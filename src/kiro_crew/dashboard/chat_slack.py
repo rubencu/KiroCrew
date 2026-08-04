@@ -9,11 +9,16 @@ from aiohttp import web
 from kiro_crew.config.loader import KiroCrewConfig
 from kiro_crew.dashboard import state as dashboard_state
 from kiro_crew.dashboard.chat_persistence import save_slot_off_loop
-from kiro_crew.dashboard.chat_utils import effective_session_key
+from kiro_crew.dashboard.chat_utils import (
+    effective_session_key,
+    expire_slack_options,
+    remember_slack_options,
+)
 from kiro_crew.dashboard.state import DashboardState
 from kiro_crew.security import redact_and_truncate
 from kiro_crew.sel import sel
 from kiro_crew.slack.channel_resolver import _CACHE_FILENAME, ChannelNameResolver
+from kiro_crew.slack.outbound import post_assistant_text, post_plain_text
 from kiro_crew.sync_bridge import handoff_to_slack
 
 logger = logging.getLogger(__name__)
@@ -125,24 +130,80 @@ async def api_chat_slot_slack_link(request: web.Request) -> web.Response:
     # resolve through, and releases the thread from any slot that held it
     # before. Hand-assigning the fields here duplicated everything except that
     # index, so a reply in the mirrored thread routed and persisted correctly
-    # while nothing ever told the open tab it had arrived.
+    # while nothing ever told the open tab it had arrived. That same index is
+    # what resolves an OPTIONS click on the control replayed below back to this
+    # conversation -- without it the click would answer into a separate session.
     state.link_slack(slot.key, thread_ts, target_channel)
 
     # Post last 5 messages as context — only when we created a NEW thread.
     # Linking to an existing thread (challenge-and-redirect) would duplicate
     # messages the thread already contains.
     if not existing_thread:
-        for m in slot.messages[-5:]:
+        # Baseline for detecting that the conversation moved on WHILE we replay.
+        # Each post below awaits Slack, so a reply can arrive mid-replay and run
+        # its own expiry pass before the newest message's control is recorded —
+        # leaving that control live for a question already superseded. Compared
+        # against after the loop.
+        _replay_running = slot.running
+        _replay_len = len(slot.messages)
+        # Filter to displayable turns BEFORE slicing: the transcript also holds
+        # rows that are never replayed (queue-cycle markers and other system
+        # entries), and a trailing one of those would otherwise make the last
+        # real reply look superseded and render its choices spent.
+        recent = [
+            m
+            for m in slot.messages
+            if m.get("role") in ("user", "assistant") and (m.get("content") or "")
+        ][-5:]
+        for idx, m in enumerate(recent):
             role = m.get("role", "")
-            txt = redact_and_truncate(m.get("content") or "", max_chars=2000)
-            if role in ("user", "assistant") and txt:
-                icon = "\U0001f9d1" if role == "user" else "\U0001f916"
-                try:
-                    await state.slack_client.post_message(
-                        target_channel, f"{icon} {txt}", thread_ts
+            content = m.get("content") or ""
+            icon = "\U0001f9d1" if role == "user" else "\U0001f916"
+            # Only the newest message may carry a live OPTIONS control, and only
+            # when it is the assistant's: an earlier one asked a question this
+            # replay has already moved past, so its choices render struck
+            # through rather than inviting an answer to a stale question.
+            is_newest_reply = role == "assistant" and idx == len(recent) - 1
+            try:
+                if role == "assistant":
+                    posted = await post_assistant_text(
+                        state.slack_client,
+                        target_channel,
+                        f"{icon} {content}",
+                        thread_ts,
+                        interactive=is_newest_reply,
+                        truncate_to=2000,
                     )
-                except Exception:
-                    pass
+                    remember_slack_options(state, session_key, posted)
+                else:
+                    # A person's own words are not agent output: a trailing
+                    # OPTIONS tag in them is literal text they typed, so it must
+                    # survive the replay rather than being parsed into choices
+                    # they never offered.
+                    await post_plain_text(
+                        state.slack_client,
+                        target_channel,
+                        f"{icon} {content}",
+                        thread_ts,
+                        truncate_to=2000,
+                    )
+            except Exception:
+                logger.debug("Failed to backfill message into Slack thread", exc_info=True)
+
+        # Did the conversation move past the replayed question while we were
+        # replaying it? A turn that started, or a transcript that grew, means the
+        # newest reply we just rendered as a LIVE control is already superseded —
+        # and that turn's own expiry ran before our record existed, so nothing
+        # else will spend it. Expire it here instead of leaving live buttons for
+        # an answer the conversation no longer wants.
+        if slot.running != _replay_running or len(slot.messages) != _replay_len:
+            try:
+                await expire_slack_options(state, session_key)
+            except Exception:
+                logger.debug(
+                    "Failed to expire replayed OPTIONS control superseded mid-replay",
+                    exc_info=True,
+                )
 
     sel().log_api_access(
         caller="dashboard",
@@ -190,9 +251,22 @@ async def api_chat_slot_slack_unlink(request: web.Request) -> web.Response:
 
     prev_channel = slot._slack_channel
     prev_thread_ts = slot._slack_thread_ts
+    # Disable the live control BEFORE tearing the link down, and EXPIRE it rather
+    # than just dropping the record. Expiry does both halves: it strikes the
+    # choices through in Slack so the buttons cannot be clicked after the link is
+    # gone (a click then would answer a question from a conversation this thread
+    # is no longer attached to, in a brand-new session), and it clears the record
+    # so no later turn can strike through a selection the user already made.
+    # Forgetting alone leaves live buttons; expiring alone would be unreachable
+    # once the reverse index is popped — so it happens here, first.
+    await expire_slack_options(state, session_key)
     slot._slack_linked = False
     slot._slack_channel = ""
     slot._slack_thread_ts = ""
+    # Drop the thread -> slot reverse index too, or the thread keeps resolving to
+    # this conversation after the link is gone.
+    if prev_thread_ts:
+        state._slack_to_slot.pop(prev_thread_ts, None)
 
     # Best-effort courtesy note so a Slack watcher knows why the thread went
     # quiet. Same redaction path as the link endpoint; failure is non-fatal.
