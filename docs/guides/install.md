@@ -412,6 +412,12 @@ import kiro_crew.sandbox as sb
 sb.reset_backend(); print(sb.detect_backend(), sb._last_unshare_failure)"
 ```
 
+`kirocrew doctor` reports the same verdict without the one-liner, and the
+dashboard's **Sandbox unavailable** screen names the mechanism and the command
+for it directly — the probe classifies the failing step into one of
+`apparmor_userns`, `max_user_namespaces`, `userns_denied` or `no_user_ns`, which
+is the row of the table above that applies to you.
+
 ## Troubleshooting
 
 Always start with `kirocrew doctor`.

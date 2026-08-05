@@ -258,14 +258,114 @@ function SetupStatusError({
   )
 }
 
+// Docs section that explains every user-namespace denial mechanism and the
+// AppArmor profile `service install` writes. Linked from the gate so the screen
+// is a starting point rather than a dead end (issue #1660).
+const SANDBOX_DOCS_URL =
+  'https://github.com/kirodotdev/KiroCrew/blob/main/docs/guides/install.md' +
+  '#linux-the-agent-sandbox-and-unprivileged-user-namespaces'
+
+/**
+ * Ordered remedy steps for one `sandbox_remedy` token.
+ *
+ * The backend probe knows WHICH unshare step failed and with which errno, and
+ * those identify the host mechanism — so the gate can name the actual fix
+ * instead of showing `errno 1 (EPERM)` and a retry button. An unrecognised or
+ * empty token renders no steps, and the screen falls back to the doctor
+ * pointer, which is still strictly more than the bare errno it replaced.
+ *
+ * Each command sits directly inside a `<pre>` rather than in a data structure:
+ * a shell command is not copy, and `pre` is the i18n gate's documented
+ * exemption for a literal that must not be translated.
+ */
+function remedySteps(remedy: string): React.ReactNode {
+  switch (remedy) {
+    case 'apparmor_userns':
+      return (
+        <ul className="mt-2 list-none space-y-3">
+          <li className="text-sm leading-relaxed text-muted">
+            {i18nT('components.kiroPrerequisiteGate.remedy_apparmor_service_install')}
+            <pre className="mt-1 overflow-x-auto rounded-lg bg-surface-2 px-2 py-1.5 text-xs text-text-strong">
+              kirocrew service install
+            </pre>
+          </li>
+          <li className="text-sm leading-relaxed text-muted">
+            {i18nT('components.kiroPrerequisiteGate.remedy_apparmor_aa_exec')}
+            <pre className="mt-1 overflow-x-auto rounded-lg bg-surface-2 px-2 py-1.5 text-xs text-text-strong">
+              aa-exec -p kirocrew-userns -- kirocrew gateway
+            </pre>
+          </li>
+        </ul>
+      )
+    case 'max_user_namespaces':
+      return (
+        <ul className="mt-2 list-none space-y-3">
+          <li className="text-sm leading-relaxed text-muted">
+            {i18nT('components.kiroPrerequisiteGate.remedy_max_user_namespaces')}
+            <pre className="mt-1 overflow-x-auto rounded-lg bg-surface-2 px-2 py-1.5 text-xs text-text-strong">
+              sudo sysctl -w user.max_user_namespaces=15000
+            </pre>
+          </li>
+        </ul>
+      )
+    case 'userns_denied':
+      return (
+        <ul className="mt-2 list-none space-y-3">
+          <li className="text-sm leading-relaxed text-muted">
+            {i18nT('components.kiroPrerequisiteGate.remedy_userns_denied')}
+            <pre className="mt-1 overflow-x-auto rounded-lg bg-surface-2 px-2 py-1.5 text-xs text-text-strong">
+              sudo sysctl -w kernel.unprivileged_userns_clone=1
+            </pre>
+          </li>
+        </ul>
+      )
+    case 'no_user_ns':
+      return (
+        <p className="mt-2 text-sm leading-relaxed text-muted">
+          {i18nT('components.kiroPrerequisiteGate.remedy_no_user_ns')}
+        </p>
+      )
+    default:
+      return null
+  }
+}
+
+function SandboxRemedy({ remedy }: { remedy: string }) {
+  return (
+    <div className="mt-4 w-full max-w-lg text-left">
+      <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-muted">
+        {i18nT('components.kiroPrerequisiteGate.how_to_fix')}
+      </p>
+      {remedySteps(remedy)}
+      <p className="mt-2 text-sm leading-relaxed text-muted">
+        {i18nT('components.kiroPrerequisiteGate.run_kirocrew_doctor_on_the_gateway_host_for_a_ful')}
+      </p>
+      <pre className="mt-1 overflow-x-auto rounded-lg bg-surface-2 px-2 py-1.5 text-xs text-text-strong">
+        kirocrew doctor
+      </pre>
+      <a
+        className="mt-2 inline-flex items-center gap-1.5 text-[13px] font-medium text-accent hover:underline focus-ring"
+        href={SANDBOX_DOCS_URL}
+        rel="noopener noreferrer"
+        target="_blank"
+      >
+        {i18nT('components.kiroPrerequisiteGate.linux_sandbox_guide')}
+        <ExternalLink className="lucide-inline" />
+      </a>
+    </div>
+  )
+}
+
 function SandboxUnavailable({
   failureKind,
   detail,
+  remedy,
   retrying,
   onRetry,
 }: {
   failureKind: string
   detail: string
+  remedy: string
   retrying: boolean
   onRetry: () => void
 }) {
@@ -274,12 +374,20 @@ function SandboxUnavailable({
   // diverge sharply. A transient failure clears on retry and must NOT push the
   // user toward disabling their own isolation; a foreign outer sandbox means
   // this host's sandbox is fine; only 'no_backend' is a host-level verdict.
+  //
+  // The generic no_backend sentence ("this host provides no OS-level sandbox")
+  // is FALSE under the Ubuntu AppArmor restriction: user namespaces work, the
+  // kernel just denied the second step. That mechanism therefore overrides the
+  // body. The other tokens leave it alone — for them the host genuinely offers
+  // no usable namespace, and their remedy step carries the specifics.
   const body =
     failureKind === 'transient'
       ? i18nT('components.kiroPrerequisiteGate.the_check_hit_a_temporary_limit_and_was_not_cach')
       : failureKind === 'foreign_sandbox'
         ? i18nT('components.kiroPrerequisiteGate.another_sandbox_already_confines_kiro_crew_so_it')
-        : i18nT('components.kiroPrerequisiteGate.this_host_provides_no_os_level_sandbox_so_kiro_c')
+        : remedy === 'apparmor_userns'
+          ? i18nT('components.kiroPrerequisiteGate.this_host_allows_user_namespaces_but_the_kernel_d')
+          : i18nT('components.kiroPrerequisiteGate.this_host_provides_no_os_level_sandbox_so_kiro_c')
   // A momentary failure that clears on retry should not be dressed in the same
   // alarm red as a host-level verdict — the body immediately walks that back.
   const transient = failureKind === 'transient'
@@ -301,6 +409,11 @@ function SandboxUnavailable({
           {i18nT('components.kiroPrerequisiteGate.kiro_cli_is_installed_but_could_not_be_verified')}
         </h1>
         <p className="mt-3 max-w-lg text-sm leading-relaxed text-muted">{body}</p>
+        {/* Only a host-level verdict is something to reconfigure. A transient
+            failure clears on retry, and a foreign outer sandbox means this host
+            is fine — offering host remedies for either would be advice to break
+            a working setup. */}
+        {failureKind === 'no_backend' && <SandboxRemedy remedy={remedy} />}
         {detail ? (
           <div className="mt-5 w-full max-w-lg text-left">
             <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-muted">
@@ -545,6 +658,7 @@ export default function KiroPrerequisiteGate({ children }: { children: ReactNode
       <SandboxUnavailable
         failureKind={status.sandbox_failure_kind}
         detail={status.sandbox_detail}
+        remedy={status.sandbox_remedy}
         retrying={retrying}
         onRetry={retryStatus}
       />

@@ -43,6 +43,7 @@ function status(overrides: Partial<KiroPrerequisiteStatus> = {}): KiroPrerequisi
     sandbox_unavailable: false,
     sandbox_failure_kind: '',
     sandbox_detail: '',
+    sandbox_remedy: '',
     missing_agent_specs: [],
     agent_spec_repair_error: '',
     operation: {
@@ -752,6 +753,111 @@ describe('KiroPrerequisiteGate', () => {
     // The aside must not contradict the headline by still saying "Install Kiro CLI".
     expect(screen.queryByText(/Install Kiro CLI, sign in once/)).not.toBeInTheDocument()
     expect(screen.queryByText(/provides no OS-level sandbox/)).not.toBeInTheDocument()
+    // A momentary failure identifies nothing to reconfigure, so the host
+    // remedies must stay hidden — they would be advice to break a working setup.
+    expect(screen.queryByText('How to fix')).not.toBeInTheDocument()
+    expect(screen.queryByText('kirocrew service install')).not.toBeInTheDocument()
+  })
+
+  it('names the AppArmor mechanism and the command that fixes it', async () => {
+    // Issue #1660: the screen used to show `errno 1 (EPERM)` and a retry button.
+    // The probe already knew this was Ubuntu's restricted-profile restriction —
+    // NEWUSER succeeded and NEWNS was denied — and that the fix is the narrow
+    // AppArmor profile `service install` writes.
+    vi.mocked(api.kiroPrerequisite).mockResolvedValue(status({
+      installed: true,
+      sandbox_unavailable: true,
+      sandbox_failure_kind: 'no_backend',
+      sandbox_detail: 'unshare(CLONE_NEWNS) failed with errno 1 (EPERM)',
+      sandbox_remedy: 'apparmor_userns',
+    }))
+
+    renderWithProviders(
+      <KiroPrerequisiteGate><div>Dashboard loaded</div></KiroPrerequisiteGate>,
+    )
+
+    expect(await screen.findByText('How to fix')).toBeInTheDocument()
+    expect(screen.getByText('kirocrew service install')).toBeInTheDocument()
+    expect(
+      screen.getByText('aa-exec -p kirocrew-userns -- kirocrew gateway'),
+    ).toBeInTheDocument()
+    // The generic "this host provides no OS-level sandbox" line is FALSE here:
+    // user namespaces work, the kernel denied the second step.
+    expect(screen.queryByText(/provides no OS-level sandbox/)).not.toBeInTheDocument()
+    expect(screen.getByText(/allows user namespaces/)).toBeInTheDocument()
+    // The reporter's explicit ask: tell me to run doctor.
+    expect(screen.getByText('kirocrew doctor')).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: /Linux sandbox guide/ })).toHaveAttribute(
+      'href',
+      expect.stringContaining('docs/guides/install.md'),
+    )
+  })
+
+  it('presents the two AppArmor commands as alternatives, not numbered steps', async () => {
+    // `service install` and a hand-started `aa-exec` gateway are mutually
+    // exclusive. Numbering them invites a skimmer to run both, leaving a systemd
+    // service they did not want plus a second gateway competing with it.
+    vi.mocked(api.kiroPrerequisite).mockResolvedValue(status({
+      installed: true,
+      sandbox_unavailable: true,
+      sandbox_failure_kind: 'no_backend',
+      sandbox_detail: 'unshare(CLONE_NEWNS) failed with errno 1 (EPERM)',
+      sandbox_remedy: 'apparmor_userns',
+    }))
+
+    renderWithProviders(
+      <KiroPrerequisiteGate><div>Dashboard loaded</div></KiroPrerequisiteGate>,
+    )
+
+    const command = await screen.findByText('kirocrew service install')
+    const list = command.closest('ul, ol')
+    expect(list).not.toBeNull()
+    expect(list!.tagName).toBe('UL')
+    // Numerals are what a command-skimmer reads, so they must not be there.
+    expect(screen.queryByText('1.')).not.toBeInTheDocument()
+    expect(screen.queryByText('2.')).not.toBeInTheDocument()
+  })
+
+  it('still points at doctor when the mechanism is unknown', async () => {
+    // An unclassified failure has no command to offer, but a dead end with a
+    // retry button was the original complaint. The diagnostic pointer is the
+    // floor, not the bonus.
+    vi.mocked(api.kiroPrerequisite).mockResolvedValue(status({
+      installed: true,
+      sandbox_unavailable: true,
+      sandbox_failure_kind: 'no_backend',
+      sandbox_detail: 'unshare(CLONE_NEWNS) failed with errno 5 (EIO)',
+      sandbox_remedy: '',
+    }))
+
+    renderWithProviders(
+      <KiroPrerequisiteGate><div>Dashboard loaded</div></KiroPrerequisiteGate>,
+    )
+
+    expect(await screen.findByText('How to fix')).toBeInTheDocument()
+    expect(screen.getByText('kirocrew doctor')).toBeInTheDocument()
+    expect(screen.queryByText('kirocrew service install')).not.toBeInTheDocument()
+    // Unclassified means the generic body is the honest one.
+    expect(screen.getByText(/provides no OS-level sandbox/)).toBeInTheDocument()
+  })
+
+  it('offers no host remedy when a foreign sandbox is the cause', async () => {
+    // This host's sandbox is fine — it just cannot nest. Sending the user to
+    // change a sysctl would be a fix for a problem they do not have.
+    vi.mocked(api.kiroPrerequisite).mockResolvedValue(status({
+      installed: true,
+      sandbox_unavailable: true,
+      sandbox_failure_kind: 'foreign_sandbox',
+      sandbox_detail: 'sandbox-exec probe failed',
+      sandbox_remedy: '',
+    }))
+
+    renderWithProviders(
+      <KiroPrerequisiteGate><div>Dashboard loaded</div></KiroPrerequisiteGate>,
+    )
+
+    expect(await screen.findByText(/Another sandbox already confines/)).toBeInTheDocument()
+    expect(screen.queryByText('How to fix')).not.toBeInTheDocument()
   })
 
   it('never withholds the dashboard from a ready install over a sandbox flag', async () => {
