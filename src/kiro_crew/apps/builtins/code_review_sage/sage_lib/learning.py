@@ -150,7 +150,7 @@ def get_active_namespaces(root: Path | None = None) -> list[str]:
 # ---------------------------------------------------------------------------
 
 def pattern_id(title: str, scope: str) -> str:
-    return hashlib.sha1(f"{title.strip().lower()}|{scope}".encode()).hexdigest()[:16]
+    return hashlib.sha256(f"{title.strip().lower()}|{scope}".encode()).hexdigest()[:16]
 
 
 def render_pattern(p: dict) -> str:

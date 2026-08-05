@@ -176,6 +176,17 @@ Resources:
       PolicyDocument:
         Version: '2012-10-17'
         Statement:
+          # Deny non-HTTPS access (SAX-05 / CWE-319).
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:*'
+            Resource:
+              - !GetAtt LogBucket.Arn
+              - !Sub '${LogBucket.Arn}/*'
+            Condition:
+              Bool:
+                'aws:SecureTransport': 'false'
           # S3 server access log delivery for OriginBucket (SAX-05).
           - Sid: S3ServerAccessLogsWrite
             Effect: Allow
@@ -188,6 +199,19 @@ Resources:
                 'aws:SourceAccount': !Ref 'AWS::AccountId'
               ArnLike:
                 'aws:SourceArn': !Sub 'arn:aws:s3:::kirocrew-deploy-${AWS::AccountId}-${AWS::Region}'
+          # CloudFront standard access log delivery (SAX-06). With
+          # BucketOwnerEnforced the legacy ACL grant is unavailable; this
+          # service-principal statement is the modern replacement.
+          - Sid: CloudFrontLogDeliveryWrite
+            Effect: Allow
+            Principal:
+              Service: delivery.logs.amazonaws.com
+            Action: s3:PutObject
+            Resource: !Sub '${LogBucket.Arn}/cf-access/*'
+            Condition:
+              StringEquals:
+                'aws:SourceAccount': !Ref 'AWS::AccountId'
+                's3:x-amz-acl': bucket-owner-full-control
           # CloudTrail bucket-ACL check + log delivery for the S3 data-event
           # trail (SAX-06). SourceArn pins the specific trail by its computed
           # ARN so no other trail can write here.
@@ -279,6 +303,11 @@ Resources:
       DistributionConfig:
         Enabled: true
         Comment: KiroCrew One-Click Deploy shared distribution
+        # SAX-06: CloudFront standard access logs for viewer-request auditing.
+        Logging:
+          Bucket: !GetAtt LogBucket.DomainName
+          IncludeCookies: false
+          Prefix: cf-access/
         # CWE-770: attach an optional WAFv2 WebACL (rate limiting / request
         # filtering) when one is supplied. Must be a CLOUDFRONT-scoped WebACL in
         # us-east-1 (see WafWebAclArn parameter). AWS::NoValue keeps the property
@@ -315,6 +344,17 @@ Resources:
       PolicyDocument:
         Version: '2012-10-17'
         Statement:
+          # Deny non-HTTPS access (SAX-05 / CWE-319).
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:*'
+            Resource:
+              - !GetAtt OriginBucket.Arn
+              - !Sub '${OriginBucket.Arn}/*'
+            Condition:
+              Bool:
+                'aws:SecureTransport': 'false'
           - Sid: AllowCloudFrontOAC
             Effect: Allow
             Principal:
