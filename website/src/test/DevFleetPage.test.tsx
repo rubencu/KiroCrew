@@ -374,6 +374,34 @@ describe('DevFleetPage', () => {
     })
   }
 
+  // --- serving install differs from the managed checkout ---
+  // The silent-wrong-answer case: Pull+Build fast-forwards the checkout and
+  // reports success while an older install keeps serving, so no other control
+  // on this page reveals that the managed code is not the running code.
+  it('warns when the install serving the dashboard is not the managed checkout', async () => {
+    mockFleet({
+      serving_install_reason: 'this dashboard is served by the install at /Applications/KiroCrew.app/Contents/Resources/backend-dist/kirocrew-backend-arm64/lib/python3.12/site-packages/kiro_crew, which is not inside the checkout Dev Fleet manages (/Users/dev/kirocrew).',
+      worktrees: [{ name: 'main', is_main: true, running: false, has_dist: true, behind: 0 }],
+    })
+    renderPage()
+    await waitFor(() => expect(screen.getByTestId('serving-install-warning')).toBeInTheDocument())
+    // Surfaced verbatim, both installs named.
+    expect(screen.getByText(/not inside the checkout Dev Fleet manages/)).toBeInTheDocument()
+    expect(screen.getByText(/backend-dist/)).toBeInTheDocument()
+  })
+
+  it('shows no serving-install warning for a matching install', async () => {
+    mockFleet({
+      worktrees: [
+        { name: 'main', is_main: true, running: false, has_dist: true, behind: 0 },
+        { name: 'feature-x', is_main: false, running: false, has_dist: true, behind: 0, path: '/wt/feature-x' },
+      ],
+    })
+    renderPage()
+    await waitFor(() => expect(screen.getByText('feature-x')).toBeInTheDocument())
+    expect(screen.queryByTestId('serving-install-warning')).toBeNull()
+  })
+
   it('explains WHY pods are unavailable instead of failing silently', async () => {
     mockFleet(FLEET_NO_PODS)
     renderPage()
@@ -1034,6 +1062,41 @@ describe('DevFleetPage restart handshake', () => {
       releaseMakeLive?.()
     }
   }, 15000)
+
+  it('keeps a failed restart on the page instead of only in a toast', async () => {
+    // The wedge message is a pair of commands with absolute paths that the
+    // operator has to run. Toasts are pointer-events:none and self-dismiss, so
+    // the one actionable failure this page can produce must also land somewhere
+    // selectable that outlives the 7s window.
+    const WEDGE = "launchctl kickstart did not return within 10s — the agent dev.kirocrew.gateway looks wedged. Reload it with `launchctl bootout gui/501/dev.kirocrew.gateway` then `launchctl load -w /Users/dev/Library/LaunchAgents/dev.kirocrew.gateway.plist`."
+    const FLEET_LIVE = {
+      gateway_service_active: true,
+      worktrees: [
+        { name: 'main', is_main: true, running: false, has_dist: true, behind: 0, is_live: true, path: '/wt/main' },
+      ],
+    }
+    vi.spyOn(globalThis, 'fetch').mockImplementation((url) => {
+      const u = typeof url === 'string' ? url : (url as Request).url
+      if (u.includes('/fleet')) return Promise.resolve(new Response(JSON.stringify(FLEET_LIVE), { status: 200 }))
+      if (u.includes('/disk')) return Promise.resolve(new Response(JSON.stringify({ total_mb: 1024 }), { status: 200 }))
+      if (u.includes('/restart-gateway')) return Promise.resolve(new Response(JSON.stringify({ ok: false, error: WEDGE }), { status: 200 }))
+      return Promise.resolve(new Response('{}', { status: 200 }))
+    })
+    renderWithProviders(<DevFleetPage />, { route: '/dev-fleet' })
+    await waitFor(() => expect(screen.getAllByText('main').length).toBeGreaterThan(0))
+
+    fireEvent.click(screen.getByLabelText('Restart gateway'))
+    const dialog = await screen.findByRole('dialog')
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Restart' }))
+
+    const banner = await screen.findByTestId('gateway-restart-error')
+    // Both recovery verbs survive, in full.
+    expect(banner.textContent).toContain('launchctl bootout')
+    expect(banner.textContent).toContain('launchctl load -w')
+    // Dismissable, so it does not become permanent furniture.
+    fireEvent.click(within(banner).getByLabelText('Dismiss'))
+    await waitFor(() => expect(screen.queryByTestId('gateway-restart-error')).toBeNull())
+  })
 
   it('reports a staged-only cutover without entering the restart handshake', async () => {
     // A host whose gateway Dev Fleet cannot bounce gets ok:true + staged_only:

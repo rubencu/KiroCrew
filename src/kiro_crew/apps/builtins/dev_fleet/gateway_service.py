@@ -61,6 +61,7 @@ from __future__ import annotations
 
 import os
 import re
+import shlex
 import uuid
 from pathlib import Path
 from typing import Awaitable, Callable, Protocol
@@ -78,6 +79,13 @@ from kiro_crew.service.macos import (
 # rather than imported so every spawn stays audited through the one seam the
 # tests already patch, and so this module has no import cycle with server.py.
 RunCmd = Callable[..., Awaitable[tuple[int, str, str]]]
+#: The prefix ``RunCmd`` puts on its stderr when it kills a command for exceeding
+#: the timeout. Shared with the implementation (dev_fleet's ``_run_cmd``) rather
+#: than restated, because a timed-out call is otherwise indistinguishable from
+#: the other ``rc == -1`` outcomes (sandbox refusal, spawn failure) — and the
+#: wedge diagnosis below depends on telling them apart. Left as prose rather than
+#: a sentinel object because the value also reaches operators verbatim.
+RUN_CMD_TIMEOUT_PREFIX = "timeout"
 #: ``shutil.which``-shaped tool lookup, injected for the same reason as the
 #: platform string (see :func:`backend`).
 Which = Callable[[str], "str | None"]
@@ -337,6 +345,12 @@ class LaunchdBackend:
 
     kind = "launchd"
 
+    #: Bound for the restart's ``kickstart`` call. Generous for a verb that
+    #: normally returns in milliseconds, because the only thing it has to
+    #: outlast is launchd accepting the request — not the respawn, which the
+    #: caller observes separately through ``start_id``.
+    _KICKSTART_TIMEOUT = 10
+
     def __init__(self, run_cmd: RunCmd, label: Callable[[], str], *,
                  platform: str, which: Which) -> None:
         self._run = run_cmd
@@ -447,11 +461,40 @@ class LaunchdBackend:
         This is what makes it safe to call from the process being killed: unlike
         ``unload`` + ``load``, there is no second command left for us to run
         after we are gone.
+
+        Bounded, because ``kickstart`` does not always return: against a job
+        launchd has parked in ``spawn scheduled`` it blocks indefinitely instead
+        of erroring, and the restart is reached for precisely when the gateway is
+        unhealthy — the state that produces that parking.
         """
         rc, _out, stderr = await self._run(
-            ["launchctl", "kickstart", "-k", self.target()], timeout=10
+            ["launchctl", "kickstart", "-k", self.target()],
+            timeout=self._KICKSTART_TIMEOUT,
         )
-        return (rc == 0, "" if rc == 0 else (stderr.strip()[:200] or "kickstart failed"))
+        if rc == 0:
+            return True, ""
+        detail = stderr.strip()[:200]
+        if rc == -1 and detail.startswith(RUN_CMD_TIMEOUT_PREFIX):
+            # A job is parked after failing fast enough to be throttled (e.g.
+            # EX_CONFIG from a missing launcher), and kickstart is never
+            # delivered — the run count does not even increment. Only a reload
+            # clears it, so name that: a bare "timeout" tells the operator
+            # nothing about what to do next.
+            # Rendered as plain text by the dashboard, so no backticks: they would
+            # show literally, and a user copying the span would paste shell
+            # command-substitution syntax into their terminal. `&&` instead of
+            # prose so the whole recovery is one paste — which also means the
+            # paths must be shell-quoted, or a home directory containing a space
+            # hands the operator a command that splits into wrong arguments.
+            return False, (
+                f"launchctl kickstart did not return within "
+                f"{self._KICKSTART_TIMEOUT}s — the agent {self._label()} looks "
+                f"wedged (launchctl print reports 'spawn scheduled' with a "
+                f"frozen run count). Reload it with: launchctl bootout "
+                f"{shlex.quote(self.target())} && launchctl load -w "
+                f"{shlex.quote(str(self.plist_path()))}"
+            )
+        return False, (detail or "kickstart failed")
 
     # -- staging --
     def plan(self, worktree: Path, kcbin: Path) -> dict:

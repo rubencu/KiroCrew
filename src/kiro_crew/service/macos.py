@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import logging
 import os
+import plistlib
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
@@ -200,6 +202,109 @@ def write_live_program(contents: str, path: Path | None = None) -> None:
         except FileNotFoundError:
             pass
         raise
+
+
+def _repairer_bin() -> str:
+    """The executable of the install performing the repair.
+
+    Resolution is deliberately narrow: an explicit ``KIROCREW_SERVICE_BIN``, else
+    the ``kirocrew`` console script sitting beside the running interpreter. There
+    is no ``PATH`` fallback, because ``PATH`` cannot answer the question being
+    asked — "which install is running" — and an unrelated or older ``kirocrew``
+    earlier on the inherited PATH would be baked into the agent, so the gateway
+    would come back as a DIFFERENT install than the one that repaired it. That is
+    a quieter form of the very mismatch this repair exists to end.
+
+    Raises ``OSError`` when neither resolves, or when what resolves is not an
+    executable file. Refusing beats guessing: nothing is written, so the launcher
+    stays absent and a later run can still fix it, whereas a wrong or
+    unexecutable target would leave launchd unable to spawn the agent AND — since
+    the file would now exist — suppress every later repair, cementing the
+    failure. The caller logs the reason.
+    """
+    override = os.environ.get("KIROCREW_SERVICE_BIN", "").strip()
+    if override:
+        resolved = kirocrew_bin()
+        if not _is_executable_file(Path(resolved)):
+            raise OSError(
+                f"refusing to restore the launchd launcher: KIROCREW_SERVICE_BIN "
+                f"resolves to {resolved!r}, which is not an executable file."
+            )
+        return resolved
+    sibling = Path(sys.executable).parent / (
+        "kirocrew.exe" if os.name == "nt" else "kirocrew"
+    )
+    if _is_executable_file(sibling):
+        return str(sibling)
+    raise OSError(
+        "refusing to restore the launchd launcher: no kirocrew console script "
+        f"beside the running interpreter ({sys.executable}). PATH is not "
+        "consulted, because an unrelated kirocrew ahead of this install on PATH "
+        "would be persisted into the agent. Set KIROCREW_SERVICE_BIN to the "
+        "intended executable, or install so the console script sits beside the "
+        "interpreter."
+    )
+
+
+def _is_executable_file(path: Path) -> bool:
+    try:
+        return path.is_file() and os.access(path, os.X_OK)
+    except OSError:
+        return False
+
+
+def ensure_live_program() -> bool:
+    """Restore a missing launcher without touching the plist. True if written.
+
+    The launcher is a derived artifact that lives OUTSIDE the install, under
+    Application Support, and the plist's ``ProgramArguments[0]`` executes it. If
+    it goes missing the agent stays loaded with nothing to run: launchd exits it
+    ``EX_CONFIG``, stops retrying, and nothing on screen explains why the
+    gateway never comes up. ``install`` repairs it only as a side effect of
+    rewriting the whole plist, which discards operator-added
+    ``EnvironmentVariables`` (a non-default ``KIROCREW_PORT``, for instance), so
+    reconciling this half alone is what keeps a customized agent intact.
+
+    Deliberately narrow: it acts only when an agent is installed AND indirected
+    through the launcher. Writing the file where no plist exists, or where the
+    plist executes a binary directly, would leave a script nothing ever runs.
+
+    The restored launcher targets the install running right now. A previous
+    Dev Fleet cutover recorded its worktree and venv-first PATH inside the very
+    file that was lost, so that pointer cannot be recovered here -- but the
+    caller performing the repair is itself a working install, and Make live can
+    re-target the agent afterwards. A dead agent has no such recovery.
+
+    Callers are responsible for the platform check, matching every other
+    function in this module.
+    """
+    if LIVE_PROGRAM.exists():
+        return False
+    try:
+        parsed = plistlib.loads(PLIST_PATH.read_bytes())
+    except Exception:
+        # Deliberately broad. This check only decides whether to rewrite a
+        # launcher, but it runs on the gateway startup path, so anything escaping
+        # it is a crash loop under launchd KeepAlive. plistlib covers the ordinary
+        # cases with OSError/ValueError, but a hand-edited plist carrying an XML
+        # syntax error — an unescaped `&` in an added EnvironmentVariables value
+        # is the usual way to get one — surfaces as xml.parsers.expat.ExpatError,
+        # whose base is Exception.
+        return False
+    # Structure is not guaranteed either: a plist's root may legally be an array,
+    # and ProgramArguments may be any type, so validate before indexing.
+    argv = parsed.get("ProgramArguments") if isinstance(parsed, dict) else None
+    if not isinstance(argv, list) or not argv or str(argv[0]) != str(LIVE_PROGRAM):
+        # No agent, or one that execs something else — not a launcher of ours.
+        return False
+    write_live_program(render_live_program(_repairer_bin()))
+    log.warning(
+        "Restored the missing launchd launcher at %s -- the agent %s was loaded "
+        "with nothing to execute. It now targets this install; use Dev Fleet's "
+        "Make live to point it at a different checkout.",
+        LIVE_PROGRAM, LAUNCHD_LABEL,
+    )
+    return True
 
 
 def install() -> None:
