@@ -1123,6 +1123,26 @@ class AgentConfig:
             "Values support ~ expansion. Empty list disables cwd overrides.",
         ),
     )
+    subagent_tree_attribution: bool = field(
+        default=False,
+        metadata=_meta(
+            "SubAgent Tree Attribution",
+            "Opt-in: build the nested-subagent orchestration tree by attributing "
+            "each spawned child to the subagent whose own event stream produced "
+            "the spawn_run result (true parent + depth). Enforces "
+            "subagent_max_depth at attribution time.",
+        ),
+    )
+    subagent_max_depth: int = field(
+        default=3,
+        metadata=_meta(
+            "SubAgent Max Depth",
+            "Maximum nested spawn depth. Depth 1 = top-level subagent. "
+            "Children at or beyond this depth lose spawn permission; "
+            "children strictly over it are cancelled. Only enforced when "
+            "subagent_tree_attribution is enabled.",
+        ),
+    )
     max_channels: int = field(
         default=1,
         metadata=_meta("Max Channels", "Maximum concurrent agent channels (1-5)."),
@@ -4559,6 +4579,8 @@ class KiroCrewConfig:
                 bot_name=_sanitize_bot_name(agent_data.get("bot_name", "")),
                 max_channels=agent_data.get("max_channels", 1),
                 max_channel_agents=agent_data.get("max_channel_agents", 3),
+                subagent_tree_attribution=bool(agent_data.get("subagent_tree_attribution", False)),
+                subagent_max_depth=_safe_int(agent_data.get("subagent_max_depth", 3), 3, lo=1),
                 soft_stop_budget_secs=max(
                     0.5, min(60.0, _safe_float(agent_data.get("soft_stop_budget_secs", 10.0), 10.0))
                 ),

@@ -13,7 +13,7 @@
  * exactly the window in which the UI would otherwise look empty. Clicking opens
  * the Subagents side panel.
  */
-import { memo } from 'react'
+import { memo, useMemo } from 'react'
 import { Bot, Loader2, CheckCircle2, AlertCircle, Clock, Square } from 'lucide-react'
 import { PanelRightSolid } from '../../components/icons/panels'
 import { useAppSelector, useAppDispatch } from '../../store'
@@ -160,6 +160,12 @@ const SubagentRunCard = memo(function SubagentRunCard({
 
   const mine = launch.ids.map(id => subagents[id])
   const counts = tally(mine)
+  // Compute max depth among our agents to convey nested spawning
+  const myMaxDepth = useMemo(() => {
+    let md = 1
+    for (const a of mine) { if (a?.depth && a.depth > md) md = a.depth }
+    return md
+  }, [mine])
   // `unknown` = ids the live slice no longer holds (history reload, or dismissed
   // from the panel). Treat them as neither running nor terminal.
   //
@@ -236,6 +242,11 @@ const SubagentRunCard = memo(function SubagentRunCard({
           <div className="flex items-center gap-1.5 flex-wrap">
             <Bot size={12} className="text-accent/70 shrink-0" aria-hidden />
             <span className="truncate text-[13px] font-medium text-text-strong">{label}</span>
+            {myMaxDepth > 1 && (
+              <span className="shrink-0 inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded bg-accent/10 border border-accent/20 text-accent/70">
+                {myMaxDepth} {i18nT('pages.chat.subagentRunCard.depth_levels')}
+              </span>
+            )}
             {queued > 0 && settled === 0 && (
               <span
                 className="shrink-0 inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded bg-muted/15 border border-border text-muted"

@@ -522,6 +522,7 @@ async def api_spawn_list(request: web.Request) -> web.Response:
             "task": _redact(info.task),
             "done": info.done,
             "parent": info.parent_session_key,
+            "depth": info.depth,
             "agent": info.agent,
             "started": info.started,
         }

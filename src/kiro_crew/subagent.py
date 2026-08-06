@@ -14,6 +14,7 @@ import ctypes
 import logging
 import math
 import os
+import re
 import time
 import uuid
 from collections.abc import Awaitable, Callable
@@ -833,14 +834,34 @@ def validate_cwd(cwd: str, allowed_roots: list[str]) -> tuple[str, str]:
     return ("", f"cwd is not under any allowed root: {allowed_roots}")
 
 
-_SYSTEM_PREFIX = (
-    "You are a focused sub-agent. Complete the following task concisely. "
-    "Do NOT create other agents. Report your result directly.\n"
-    "IMPORTANT: Do NOT narrate your own process, failures, retries, or "
-    "orchestration decisions. The user does not care how you got the answer. "
-    "Do NOT include [OPTIONS: ...] tags. Do NOT use the AskUserQuestion tool. "
-    "Only output meaningful, actionable results. Never output greetings or filler.\n\n"
+_NO_SPAWN_CLAUSE = "Do NOT create other agents. "
+_MAY_SPAWN_CLAUSE = (
+    "You may spawn sub-agents via spawn_run if a task genuinely benefits from "
+    "parallel decomposition. Honour the depth budget: you will be told if your "
+    "children cannot spawn further. "
 )
+
+
+def _build_system_prefix(can_spawn: bool = False) -> str:
+    """Build the system prefix for a subagent, optionally allowing spawn."""
+    spawn_clause = _MAY_SPAWN_CLAUSE if can_spawn else _NO_SPAWN_CLAUSE
+    return (
+        f"You are a focused sub-agent. Complete the following task concisely. "
+        f"{spawn_clause}Report your result directly.\n"
+        "IMPORTANT: Do NOT narrate your own process, failures, retries, or "
+        "orchestration decisions. The user does not care how you got the answer. "
+        "Do NOT include [OPTIONS: ...] tags. Do NOT use the AskUserQuestion tool. "
+        "Only output meaningful, actionable results. Never output greetings or filler.\n\n"
+    )
+
+
+# Default prefix used by existing call sites (no-spawn).
+_SYSTEM_PREFIX = _build_system_prefix(can_spawn=False)
+
+# Regex for stream-based attribution: matches the server-composed per-child line
+# in spawn_run tool output. Two leading spaces, 8 hex chars (capture group 1),
+# optional ` (agent_name)`, then `: `.
+_SPAWN_RESULT_ID_RE = re.compile(r"^  ([0-9a-f]{8})(?: \([^)\n]*\))?: ", re.MULTILINE)
 
 
 @dataclass
@@ -862,6 +883,8 @@ class SubagentInfo:
     result_truncated: bool = False  # completion-event copy dropped content → summary+path
     error: str = ""
     parent_session_key: str = ""
+    depth: int = 1  # 1 = direct child of root; nested spawns get depth > 1
+    can_spawn: bool = False  # whether this subagent is permitted to spawn children
     agent: str = ""
     # The app that spawned this child (empty for a non-app spawn). Persisted so
     # the child's per-tool-call gate can resolve the app's Level-2 profile, not
@@ -1100,6 +1123,21 @@ class SubagentManager:
         except AttributeError:
             pass  # test doubles without the setter
         self._tasks: dict[str, asyncio.Task] = {}  # type: ignore[type-arg]
+        # --- Nested-tree attribution state ---
+        self._pending_attribution: set[str] = set()
+        # Resolve attribution config once at process startup.
+        try:
+            from kiro_crew.config import KiroCrewConfig
+
+            _acfg = KiroCrewConfig.load().agent
+            self._attribution_enabled: bool = bool(
+                getattr(_acfg, "subagent_tree_attribution", False)
+            )
+            self._attribution_max_depth: int = int(getattr(_acfg, "subagent_max_depth", 3))
+        except Exception:
+            logger.warning("tree: attribution config unreadable at init — deny-by-default")
+            self._attribution_enabled = False
+            self._attribution_max_depth = 0  # deny-by-default sentinel
         # Queued spawns store the FULL spawn() kwarg set (not just a 5-tuple), so a
         # drained spawn preserves approval_mode / silent / model / allowed_tools / bare —
         # dropping them made a queued headless/auto spawn hit the deny-by-default gate and
@@ -2725,6 +2763,40 @@ class SubagentManager:
             conversation_key=conversation_key,
         )
         info._raw_task = task  # unredacted prompt for kiro-cli execution
+        # --- Depth guard + tree registration ---
+        # Resolve parent depth: if parent is a subagent, inherit depth + 1.
+        parent_depth = 0
+        if parent_session_key.startswith("subagent:"):
+            parent_id = parent_session_key.removeprefix("subagent:")
+            parent_info = self._agents.get(parent_id)
+            if parent_info is not None:
+                parent_depth = parent_info.depth
+        child_depth = parent_depth + 1
+        info.depth = child_depth
+        max_depth = self._attribution_max_depth
+        if self._attribution_enabled and max_depth > 0:
+            info.can_spawn = child_depth < max_depth
+            # Hard depth guard: deny over-ceiling spawns
+            if child_depth > max_depth:
+                sel().log_tool_invocation(
+                    session_key=parent_session_key,
+                    source="subagent",
+                    tool_name="spawn_run",
+                    outcome="denied_max_depth",
+                    metadata={
+                        "subagent_id": agent_id,
+                        "depth": child_depth,
+                        "max_depth": max_depth,
+                        "parent_id": parent_session_key,
+                    },
+                )
+                info.done = True
+                info.error = f"Spawn denied: depth {child_depth} exceeds max_depth {max_depth}."
+                self._agents[agent_id] = info
+                return info
+        else:
+            info.can_spawn = False
+        self._pending_attribution.add(agent_id)
         self._agents[agent_id] = info
         self._running_count += 1
         self._last_spawn_ts = time.monotonic()  # stagger gate: one start per interval
@@ -3692,6 +3764,7 @@ class SubagentManager:
                     self._running_count -= 1
                     self._drain_queue()
                 self._tasks.pop(info.id, None)
+                self._pending_attribution.discard(info.id)
                 # Teardown is done (or was skipped because the reaper did it) —
                 # release the report's delivered-tombstone gate. Unconditional,
                 # so the report can never wedge on a cancelled teardown.
@@ -3949,6 +4022,108 @@ class SubagentManager:
         except Exception:
             logger.debug("Failed to write tombstone for %s", info.id, exc_info=True)
 
+    def _attribute_spawn_children(self, parent: SubagentInfo, output: str) -> None:
+        """Attribute spawned children to their true parent via stream output parsing.
+
+        Security properties:
+        - Anchored regex matches only server-composed lines
+        - Exactly-once consumption from _pending_attribution
+        - Deny-by-default when config unavailable (max_depth == 0)
+        - Monotonic depth (can only increase)
+        - Self-id skip
+        """
+        if not self._attribution_enabled:
+            return
+
+        max_depth = self._attribution_max_depth
+        matched_ids = _SPAWN_RESULT_ID_RE.findall(output)
+        if not matched_ids:
+            return
+
+        for cid in matched_ids:
+            # Skip self-id
+            if cid == parent.id:
+                continue
+            # Only consume from pending (exactly-once)
+            if cid not in self._pending_attribution:
+                continue
+            child = self._agents.get(cid)
+            if child is None:
+                # Agent evicted/completed before attribution
+                self._pending_attribution.discard(cid)
+                continue
+            self._pending_attribution.discard(cid)
+
+            if max_depth == 0:
+                # Deny-by-default: config unavailable sentinel
+                child.can_spawn = False
+                from kiro_crew.sel import sel
+
+                sel().log_tool_invocation(
+                    session_key=f"subagent:{parent.id}",
+                    source="subagent",
+                    tool_name="spawn_run",
+                    outcome="attribution_config_unavailable",
+                    metadata={
+                        "subagent_id": cid,
+                        "parent_id": parent.id,
+                    },
+                )
+                continue
+
+            # Record previous state for at-ceiling detection
+            was_can_spawn = child.can_spawn
+            # Attribute: set true parent and compute depth
+            child.parent_session_key = f"subagent:{parent.id}"
+            child.depth = max(child.depth, parent.depth + 1)  # monotonic
+            child.can_spawn = child.depth < max_depth
+
+            # At-ceiling: revoke spawn permission
+            if was_can_spawn and not child.can_spawn and child.depth <= max_depth:
+                from kiro_crew.sel import sel
+
+                sel().log_tool_invocation(
+                    session_key=f"subagent:{parent.id}",
+                    source="subagent",
+                    tool_name="spawn_run",
+                    outcome="spawn_permission_revoked_attribution",
+                    metadata={
+                        "subagent_id": cid,
+                        "depth": child.depth,
+                        "max_depth": max_depth,
+                        "parent_id": parent.id,
+                    },
+                )
+            # Over-depth: cancel the child
+            elif child.depth > max_depth:
+                logger.warning(
+                    "tree: cancelling over-depth child %s (depth=%d > max=%d)",
+                    cid,
+                    child.depth,
+                    max_depth,
+                )
+                from kiro_crew.sel import sel
+
+                sel().log_tool_invocation(
+                    session_key=f"subagent:{parent.id}",
+                    source="subagent",
+                    tool_name="spawn_run",
+                    outcome="cancelled_max_depth_attribution",
+                    metadata={
+                        "subagent_id": cid,
+                        "depth": child.depth,
+                        "max_depth": max_depth,
+                        "parent_id": parent.id,
+                    },
+                )
+                try:
+                    loop = asyncio.get_event_loop()
+                    t = loop.create_task(self.cancel(cid))
+                    _background_tasks.add(t)
+                    t.add_done_callback(_background_tasks.discard)
+                except Exception:
+                    logger.debug("Failed to cancel over-depth child %s", cid, exc_info=True)
+
     async def _run_inner(self, info: SubagentInfo, session_key: str) -> None:
         """Inner execution — called within timeout wrapper."""
         # Mark the real start of execution BEFORE any await so the startup
@@ -4129,9 +4304,13 @@ class SubagentManager:
             is_cc = self._is_cc_provider(client)
         # Intentionally check info.agent (not resolved `agent`) so only
         # explicitly requested agents skip _SYSTEM_PREFIX (defense-in-depth).
+        # Named agents still get the depth guard (D1 closes the latent recursion
+        # risk for named-agent spawns).
         named_agent = bool(info.agent and _AGENT_NAME_RE.fullmatch(info.agent))
         raw_task = info._raw_task or info.task
-        message = raw_task if named_agent else (_SYSTEM_PREFIX + raw_task)
+        # Depth-aware prefix: subagents with can_spawn=True get the spawn clause.
+        prefix = _build_system_prefix(can_spawn=info.can_spawn)
+        message = raw_task if named_agent else (prefix + raw_task)
         if info._cancel_retry_used and (info.streaming_text or info.tool_count > 0):
             # One-shot auto-continue after an unexpected cancellation: tell the
             # model the prior attempt was interrupted so it completes the task
@@ -4163,7 +4342,14 @@ class SubagentManager:
         # Reports inherited agent (not just info.agent) so telemetry shows
         # the actual agent used for this subagent session.
         await self._fire_event(
-            "subagent_spawn", info, {"task": _redact(info.task), "agent": agent or ""}
+            "subagent_spawn",
+            info,
+            {
+                "task": _redact(info.task),
+                "agent": agent or "",
+                "parent": info.parent_session_key,
+                "depth": info.depth,
+            },
         )
         # Stream results to disk for orchestrated chat.
 
@@ -4481,10 +4667,14 @@ class SubagentManager:
                 # branch existed, hooks registered for subagent-spawned tools
                 # received PreToolUse but never PostToolUse — losing the
                 # tool_response payload.
+                _tool_name = _pending_tools.pop(event.tool_call_id, "")
+                _out_full = event.tool_output or ""
+                # Stream-based tree attribution: intercept spawn_run results
+                if _tool_name == "spawn_run":
+                    self._attribute_spawn_children(info, _out_full)
                 if self.hook_store is not None:
                     try:
-                        _tool_name = _pending_tools.pop(event.tool_call_id, "")
-                        _out = _redact((event.tool_output or "")[:2000])
+                        _out = _redact(_out_full[:2000])
                         await self.hook_store.fire(
                             HOOK_EVENT_POST_TOOL_USE,
                             tool_name=_tool_name,

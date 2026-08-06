@@ -3569,7 +3569,10 @@ def _call_tool_inner(name: str, args: dict[str, Any]) -> str:
                 )
             for aid, a, t in zip(agent_ids, agent_names, agent_tasks):
                 label = f"{aid} ({a})" if a else aid
-                spawn_lines.append(f"  {label}: {t[:80]}")
+                # Strip newlines: a task containing \n could inject a fake child
+                # line matching _SPAWN_RESULT_ID_RE in downstream attribution.
+                safe_task = t[:80].replace("\n", " ").replace("\r", " ")
+                spawn_lines.append(f"  {label}: {safe_task}")
             if keep:
                 spawn_lines.append(
                     "These conversations have GUARANTEED continuability: after "
