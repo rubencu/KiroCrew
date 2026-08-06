@@ -164,7 +164,12 @@ async def api_status(request: web.Request) -> web.Response:
     if time.time() - _updates_mod._last_update_check > _UPDATE_CHECK_INTERVAL:
         asyncio.create_task(_do_update_check())
 
-    data = state.status_snapshot(update_available=bool(_update_info.get("available")))
+    data = state.status_snapshot(
+        update_available=bool(_update_info.get("available")),
+        update_self_updatable=bool(_update_info.get("self_updatable")),
+        update_checked=bool(_update_info.get("checked")),
+        update_command=str(_update_info.get("update_command") or ""),
+    )
     static_info = _get_static_system_info()
     if state._owner_hash is not None:
         owner_hash = state._owner_hash
