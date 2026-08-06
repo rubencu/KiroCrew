@@ -2215,7 +2215,14 @@ class ExternalRegistryConfig:
 class SkillsConfig:
     max_triggered: int = field(
         default=3,
-        metadata=_meta("Max Triggered", "Maximum number of skills to load per message (≥1)."),
+        metadata=_meta(
+            "Max Triggered",
+            "Maximum number of skills a single message may flag as relevant (≥0). "
+            "Each match contributes a one-line pointer naming the skill and its "
+            "path, not the skill's body — the agent reads the file if the skill "
+            "applies. Set to 0 to stop flagging entirely and rely only on the "
+            "Available Skills index, $skillname, and skill_search.",
+        ),
     )
     # ── Lazy skill injection (opt-in, like MCP prewarm) ──
     lazy_load: bool = field(
@@ -2346,9 +2353,9 @@ class SkillsConfig:
     )
 
     def __post_init__(self) -> None:
-        if self.max_triggered < 1:
-            logger.warning("max_triggered %d < 1, using 1", self.max_triggered)
-            object.__setattr__(self, "max_triggered", 1)
+        if self.max_triggered < 0:
+            logger.warning("max_triggered %d < 0, using 0", self.max_triggered)
+            object.__setattr__(self, "max_triggered", 0)
         if self.auto_min_tool_calls < 2:
             logger.warning("auto_min_tool_calls %d < 2, using 2", self.auto_min_tool_calls)
             object.__setattr__(self, "auto_min_tool_calls", 2)

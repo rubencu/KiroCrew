@@ -52,7 +52,8 @@ when this skill is activated.
 | `name` | Yes | Display name |
 | `description` | Yes | One-line summary (shown in skill listings) |
 | `always` | No | `true` to inject full content every session |
-| `triggers` | No | Comma-separated trigger phrases for auto-loading. Prefix with `!` for negative triggers (e.g. `!test` excludes when "test" appears) |
+| `triggers` | No | Comma-separated trigger phrases. A match adds a one-line pointer naming this skill and its path, and the agent reads the file if it applies. Prefix with `!` for negative triggers (e.g. `!test` excludes when "test" appears) |
+| `inject_on_trigger` | No | `true` to inject this skill's **full content** on a trigger match instead of a pointer. Use only for a procedure that must be *obeyed* whenever it matches, since it is charged on every turn the match repeats — a pointer leaves the read up to the agent |
 
 ## Creating Skills
 

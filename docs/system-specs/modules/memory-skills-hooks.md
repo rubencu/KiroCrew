@@ -607,7 +607,7 @@ Skills with auxiliary files (scripts, assets) include `dir` path so the LLM can 
 
 **Lazy-load (`skills.lazy_load`, default false — loader `SkillsConfig`):** controls how `get_context(budget)` (`skills.py`) injects the on-demand set.
 - **OFF** (`get_context(budget=None)`): the byte-for-byte legacy full dump — every on-demand skill summarized, unranked and untruncated, under the flat 165k `_CONTEXT_BUDGET_BASE`.
-- **ON** (`get_context(budget)`): `always: true` pinned skills are injected in full, plus a usage-ranked **top-K** of on-demand skills filled up to `budget`. Ranking is by `_rank_key` (`skills.py`) — `(usage_hits, effective_recency)` from the `SkillUsageLedger`, with a recency boost so freshly-added skills escape cold start. The long tail is left discoverable via the `skill_search` tool, the `$skillname` inline token, `cat`, and the per-message trigger auto-loader.
+- **ON** (`get_context(budget)`): `always: true` pinned skills are injected in full, plus a usage-ranked **top-K** of on-demand skills filled up to `budget`. Ranking is by `_rank_key` (`skills.py`) — `(usage_hits, effective_recency)` from the `SkillUsageLedger`, with a recency boost so freshly-added skills escape cold start. The long tail is left discoverable via the `skill_search` tool, the `$skillname` inline token, `cat`, and the per-message trigger hint.
 
 **Usage ledger (`skill_usage.py`, `SkillUsageLedger`):** in-memory per-skill hit tally with debounced, atomic persistence to `skill-usage.json` (`SKILL_USAGE_FILENAME`, co-located with the Kiro Crew home). Entries older than a 30-day TTL (`_MAX_AGE_SECS`) are dropped on load/flush so a stale skill stops occupying a top-K slot. Hits are recorded in `get_triggered_skills` (`_record_use`) and `resolve_dollar_skills` **regardless of the `lazy_load` flag**, so ranking data accrues even while the feature is off. Best-effort: ledger init failure falls back to recency-only / unweighted ranking without breaking skill loading.
 
@@ -671,6 +671,57 @@ exclude). To keep it off the per-message filesystem/config hot path:
   when the loader is rebuilt (per gateway), matching `extra_paths` semantics;
 - exactly **one** SEL audit event is emitted for the matched set (skipped
   entirely when nothing matched, the common case), not one per skill scanned.
+
+A match injects a **pointer, not a body.** `trigger_hint()` renders the matched
+set as one `[Relevant skills for this message]` line per skill — name,
+truncated description, `SKILL.md` path, containing dir — and the agent reads the
+file if the skill applies, the same affordance `## Available Skills` already
+directs it to. Rationale: a body is 8k–34k chars and word-overlap matching pulls
+in large unrelated skills often enough that body price per match made
+`loaded_skill` the largest single block of assembled context, ~48% of it, with
+about half of that being verbatim resends of a body ACP already replays from
+native history. The hint wording deliberately does not ask for a re-read of a
+skill already present earlier in the conversation: that content is still in the
+window, and a needless `cat` spends a tool round-trip to put the body back in as
+tool output.
+
+Paths that still inject full bodies, unchanged: `always: true` pinned skills
+(skipped by the matcher entirely) and the explicit `$skillname` token. Set
+`skills.max_triggered = 0` to stop flagging altogether and rely only on the
+index, `$skillname`, and `skill_search`; the block is attributed as `skill_hint`
+in the per-turn context breakdown.
+
+**`inject_on_trigger: true` — per-skill guaranteed exposure.** A pointer makes
+delivery voluntary: the agent decides whether to read the file, so a skill
+authored to be *obeyed* on match (a mandatory pre-flight check, for instance)
+could be silently skipped. Such a skill sets `inject_on_trigger: true` in its
+frontmatter and keeps the old semantics — `split_triggered()` routes it to a full
+`[Skill: ]` body while everything else in the same match becomes a pointer line.
+It is the middle ground between the two extremes: `always: true` is charged on
+every turn regardless of relevance, and `$skillname` requires the user to already
+know the skill exists. The opt-in is explicit; the absent flag means pointer. It
+carries no new privilege surface, because foreign-imported skills are already
+refused for declaring `triggers` at all (`onboarding_import.py`).
+
+**Why pointer-by-default rather than per-session dedup.** Injecting the body on
+first match and a pointer thereafter would also capture the measured resend
+waste, and it was considered. It was not chosen because it still pays full body
+price once per skill per session for a *false* match — the 22k of `computer-use`
+on a message that merely said "click" — and because it needs correct re-arming on
+compaction, `/new`, agent switch, model switch, and `SKILL.md` mtime change. A
+missed re-arm fails unsafe: the agent is left believing it holds instructions
+that compaction has since dropped. The pointer is stateless and has neither
+failure mode, and `inject_on_trigger` covers the case where guaranteed delivery
+is actually required.
+
+**What `_record_use` counts.** A trigger match, which is what it has always
+counted — the call sits in `get_triggered_skills` ahead of any delivery decision,
+as it did when delivery was unconditional. Decoupling delivery does make the
+consequence plainer: the lazy-load hotness ledger accrues hits for skills the
+agent may never read, so a matcher false positive still earns ranking weight.
+That is pre-existing, and cheaper to correct now that a false positive costs a
+line rather than a body — measuring the matcher's false-positive rate is the
+prerequisite, not a change to the ledger.
 
 **CRUD operations** (via `SkillsLoader`):
 - `create_skill(name, content)` — creates `{name}/SKILL.md`, supports nested paths
