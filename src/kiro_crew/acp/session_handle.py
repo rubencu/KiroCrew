@@ -156,6 +156,15 @@ _TURN_BOUNDED_WINDOWS = (
 )
 
 
+# Window-warning signatures already logged this gateway boot (mirrors
+# ``_warned_env_keys`` in config.loader). The snapshot is re-taken on EVERY
+# handle creation, so an unconditional warning re-fires for the same static
+# config on each new session — hundreds of identical lines per day that bury
+# real signal. A signature covers the observed values, so a CHANGED
+# misconfiguration (edited config, different per-agent override) warns anew.
+_warned_window_signatures: set[tuple[str, str, float, float]] = set()
+
+
 def _clamp_to_prompt_ceiling(key: str, value: float, chat_ceiling: float) -> float:
     """Bound one watchdog window to the transport's per-prompt timeout.
 
@@ -170,18 +179,23 @@ def _clamp_to_prompt_ceiling(key: str, value: float, chat_ceiling: float) -> flo
     Mirrors the shape of ``turn_dispatch.chat_turn_timeout_secs``'s clamp
     against the same timeout: an out-of-range value is honoured as far as the
     system can honour it, and the clamp is logged at warning level so the
-    misconfiguration is visible instead of silently ignored.
+    misconfiguration is visible instead of silently ignored. The warning is
+    deduplicated per (key, value, ceiling) signature for the gateway's
+    lifetime — the clamp itself always applies.
     """
     ceiling = prompt_timeout_for_ceiling(chat_ceiling)
     budget = ceiling * _TURN_CEILING_WINDOW_FRACTION
     if value <= budget:
         return value
-    logger.warning(
-        "watchdog.%s=%.0fs leaves no room inside the %.0fs prompt timeout; "
-        "clamping to %.0fs. The turn's own timeout would fire first, so the "
-        "larger window cannot take effect.",
-        key, value, ceiling, budget,
-    )
+    signature = ("clamp", key, value, ceiling)
+    if signature not in _warned_window_signatures:
+        _warned_window_signatures.add(signature)
+        logger.warning(
+            "watchdog.%s=%.0fs leaves no room inside the %.0fs prompt timeout; "
+            "clamping to %.0fs. The turn's own timeout would fire first, so the "
+            "larger window cannot take effect.",
+            key, value, ceiling, budget,
+        )
     return budget
 
 
@@ -192,9 +206,14 @@ def _warn_if_above_chat_ceiling(key: str, value: float, chat_ceiling: float) -> 
     Deliberately not clamped. The same handle also serves callers that pass
     their own, larger prompt timeout (a review run, a cron turn), and shrinking
     every window to the dashboard's ceiling would cancel their live work. So the
-    mismatch is reported and left to the operator.
+    mismatch is reported and left to the operator — once per (key, value,
+    ceiling) signature for the gateway's lifetime, not on every new handle.
     """
     if 0 < chat_ceiling < value:
+        signature = ("ceiling", key, value, chat_ceiling)
+        if signature in _warned_window_signatures:
+            return
+        _warned_window_signatures.add(signature)
         logger.warning(
             "watchdog.%s=%.0fs exceeds agent.chat_turn_timeout_secs=%.0fs — a "
             "dashboard turn ends before this window can act, so a stall there "

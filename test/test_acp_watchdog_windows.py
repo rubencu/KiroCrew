@@ -63,6 +63,17 @@ def _load_with(monkeypatch: pytest.MonkeyPatch, cfg: KiroCrewConfig) -> Watchdog
     return _load_watchdog_settings()
 
 
+@pytest.fixture(autouse=True)
+def _fresh_warning_dedup(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Each test observes warnings as a freshly booted gateway would.
+
+    The dedup set is module-level state (one gateway boot = one set); without
+    a reset, whichever test runs first would swallow the warnings every later
+    test asserts on.
+    """
+    monkeypatch.setattr(session_handle, "_warned_window_signatures", set())
+
+
 # ── Reachability ─────────────────────────────────────────────────────────────
 
 
@@ -141,6 +152,60 @@ def test_sampling_interval_is_not_a_window(monkeypatch: pytest.MonkeyPatch) -> N
     cfg = _fake_config(wellness_sample_secs=99999.0)
     wd = _load_with(monkeypatch, cfg)
     assert wd.wellness_sample_secs == 99999.0
+
+
+# ── Warning dedup ────────────────────────────────────────────────────────────
+
+
+def test_same_misconfiguration_warns_once_per_boot(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The snapshot is re-taken on every handle creation; an unchanged static
+    misconfiguration must not re-warn on each new session. The clamp itself
+    still applies on every load."""
+    cfg = _fake_config(tool_stall_suspect_secs=10800.0, tool_stall_hard_cap_secs=10800.0)
+    with caplog.at_level(logging.WARNING, logger=_LOGGER_NAME):
+        first = _load_with(monkeypatch, cfg)
+        warned_lines = sum("clamping" in r.message for r in caplog.records)
+        second = _load_with(monkeypatch, cfg)
+
+    assert first.tool_stall_suspect_secs == _WINDOW_BUDGET
+    assert second.tool_stall_suspect_secs == _WINDOW_BUDGET  # clamp still applied
+    later_lines = sum("clamping" in r.message for r in caplog.records)
+    assert warned_lines == later_lines == 2  # one per key, no repeats
+
+
+def test_a_changed_misconfiguration_warns_anew(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Dedup is keyed on the observed values, not the key alone: an edited
+    config (or a different per-agent override) is a NEW misconfiguration and
+    must surface."""
+    with caplog.at_level(logging.WARNING, logger=_LOGGER_NAME):
+        _load_with(monkeypatch, _fake_config(tool_stall_suspect_secs=10800.0))
+        _load_with(monkeypatch, _fake_config(tool_stall_suspect_secs=14400.0))
+
+    suspect_warnings = [r for r in caplog.records if "tool_stall_suspect_secs" in r.message]
+    assert len(suspect_warnings) == 2
+    assert "10800" in suspect_warnings[0].message
+    assert "14400" in suspect_warnings[1].message
+
+
+def test_chat_ceiling_advisory_also_dedups(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Two loads of the same lowered-ceiling config produce each advisory line
+    exactly once — default windows above the ceiling included."""
+    cfg = _fake_config(turn_timeout=300.0, tool_stall_suspect_secs=3600.0)
+    with caplog.at_level(logging.WARNING, logger=_LOGGER_NAME):
+        _load_with(monkeypatch, cfg)
+        first_count = len(caplog.records)
+        _load_with(monkeypatch, cfg)
+
+    assert first_count >= 1  # the suspect window advisory at minimum
+    assert len(caplog.records) == first_count  # second load adds nothing
+    messages = [r.message for r in caplog.records]
+    assert len(set(messages)) == len(messages)  # and no line repeated within the first
 
 
 def test_load_failure_still_yields_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
