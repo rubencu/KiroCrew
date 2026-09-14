@@ -3489,6 +3489,9 @@ class _ChatSlot:
         "_summary_turn_mark",
         "_detail_render_lock",
         "_last_stop_reason",
+        "_last_turn_landed",
+        "_last_turn_semantic_answer",
+        "_last_turn_answer_outcome",
         "_created_by",
         "_artifact",
         "_channel_folder_filed",
@@ -3556,7 +3559,7 @@ class _ChatSlot:
         "_poisoned_reset_used",
         "_empty_response_retries",
         "_promise_only_retries",
-        "_promise_only_stop_gen",
+        "_synthetic_continue_stop_gen",
         "_compaction_continue_retries",
         "_batch_rejected",
         "_batch_rejected_cause",
@@ -3577,6 +3580,7 @@ class _ChatSlot:
         "_human_seen",
         "_origin",
         "_pending_variants",
+        "_pending_variant_recovery",
         "_lock",
         "forked_from",
         "_fork_lock",
@@ -3780,6 +3784,19 @@ class _ChatSlot:
         # finish, and deriving anything from it would describe work that was
         # interrupted mid-flight as if it had concluded.
         self._last_stop_reason: str = ""
+        # True only when the most recent runner turn reached its landed-success
+        # point. Reset at every runner entry and written from the runner's local
+        # outcome in finally, so swallowed provider/auth/process errors cannot
+        # leave a prior successful turn's value behind for orchestration gates.
+        self._last_turn_landed: bool = False
+        # True only when the most recent runner turn produced model-authored
+        # semantic answer text. Host status/error/file-change rows never set it.
+        self._last_turn_semantic_answer: bool = False
+        # Structural classification of that answer for stage accounting. Empty
+        # means no completed answer; the runner distinguishes a substantive
+        # end-turn from model refusal and denied-permission terminals without
+        # interpreting the model's prose.
+        self._last_turn_answer_outcome: str = ""
         #: The resolved slot key of the caller that asked for this session via the
         #: session-control create verb, or "" for a slot nobody asked for -- a
         #: person's own tab, a fork, a restore. Read by
@@ -4036,10 +4053,12 @@ class _ChatSlot:
         # final message (announced an immediate action, then yielded with no tool
         # call). Reset like the other per-turn retry budgets on a landed turn.
         self._promise_only_retries: int = 0
-        # Monotonic _stop_generation snapshot taken when a promise-only continuation
-        # is enqueued; the dispatch-point purge compares against it to catch a Stop
-        # that pressed AND resolved to idle while the continuation waited.
-        self._promise_only_stop_gen: int = 0
+        # Monotonic _stop_generation snapshot taken when ANY head-inserted
+        # synthetic continuation (promise-only, compaction, or post-token
+        # recovery) is enqueued — only one is ever queued per turn. The
+        # dispatch-point purge compares against it to catch a Stop that pressed
+        # AND resolved to idle while the continuation waited.
+        self._synthetic_continue_stop_gen: int = 0
         # One bounded synthetic continuation when the BACKEND compacted the
         # conversation mid-turn and then ended the turn without finishing the
         # work (see COMPACTION_RECOVERY_PREFIX). Bounded separately from the
@@ -4126,6 +4145,10 @@ class _ChatSlot:
         self._origin: str = ""
         # Regenerate feature: variants pending attachment to next finalized assistant message
         self._pending_variants: list[dict] = []
+        # Banner-only regeneration first creates an empty active variant; one
+        # runtime owner in chat_runner carries its target, buffered segments,
+        # and commit state until terminal flush/cancellation settles exactly once.
+        self._pending_variant_recovery: object | None = None
         self._lock = asyncio.Lock()
         self.forked_from: str | None = None  # parent slot key if this is a fork
         self._fork_lock: asyncio.Lock = asyncio.Lock()  # serialises concurrent forks on this slot
