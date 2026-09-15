@@ -66,6 +66,7 @@ from kiro_crew.dashboard.origin import is_direct_local_request, is_proxied_reque
 from kiro_crew.dashboard.state import (
     CRON_NOTIFY_END,
     CRON_NOTIFY_PREFIX,
+    MAX_SLOT_QUEUE,
     DashboardState,
 )
 from kiro_crew.dashboard.token_auth import caller_names_a_missing_slot
@@ -103,6 +104,10 @@ from kiro_crew.validation import (
 
 #: Seconds to wait for Slack when verifying a pasted token at save time.
 _TOKEN_VERIFY_TIMEOUT = 8
+
+#: Machine-readable reasons a requested origin session used the fallback path.
+_SESSION_FALLBACK_QUEUE_FULL = "session_queue_full"
+_SESSION_FALLBACK_UNAVAILABLE = "session_unavailable"
 
 #: A Slack message timestamp is `<10-digit epoch>.<6-digit sequence>` -- 17
 #: characters. The cap is what BOUNDS the value: these routes forward `ts` to
@@ -2358,6 +2363,7 @@ async def api_send_message(request: web.Request) -> web.Response:
     sent_slack = False
     slack_ts: str | None = None
     sent_session = False
+    session_fallback_reason = ""
     # A channel target is not a session-injection target: _resolve_session_target
     # accepts only "origin", and the delivery below keys off channel_target.
     target_session = "" if channel_target else session_name
@@ -2433,6 +2439,7 @@ async def api_send_message(request: web.Request) -> web.Response:
         if target_session == "slack":
             target_session = ""
         if target_session:
+            session_fallback_reason = _SESSION_FALLBACK_UNAVAILABLE
             slot_key, job_name = _resolve_session_target(state, target_session, caller_session)
             if slot_key:
                 # Resolve the origin slot. get_slot is the hot path (fast,
@@ -2470,17 +2477,29 @@ async def api_send_message(request: web.Request) -> web.Response:
                     # clobbers the plan. _in_stage_execution closes it — same predicate
                     # the user-typed path uses (chat_handlers._api_chat).
                     if slot.running or slot._in_stage_execution:
-                        if len(slot._queue) >= 50:
-                            evicted = slot.queue_pop(0)
+                        while len(slot._queue) >= MAX_SLOT_QUEUE:
+                            evicted = slot.queue_evict_oldest_if_unowned()
+                            if evicted is None:
+                                break
                             logger.warning(
-                                "Queue full for slot %s — evicting oldest message", slot_key
+                                "Queue full for slot %s — evicting oldest unowned message",
+                                slot_key,
                             )
                             _remove_queued_by_id(slot.messages, evicted["id"])
-                        qid = slot.queue_append(wrapped, kind=CRON_NOTIFICATION_KIND)
-                        _cls = json.loads(inject_cls)
-                        _cls["queue_id"] = qid
-                        slot.append("queued", wrapped, json.dumps(_cls))
-                        state.push_slots_update()
+                        if len(slot._queue) < MAX_SLOT_QUEUE:
+                            qid = slot.queue_append(wrapped, kind=CRON_NOTIFICATION_KIND)
+                            _cls = json.loads(inject_cls)
+                            _cls["queue_id"] = qid
+                            slot.append("queued", wrapped, json.dumps(_cls))
+                            state.push_slots_update()
+                            sent_session = True
+                        else:
+                            session_fallback_reason = _SESSION_FALLBACK_QUEUE_FULL
+                            logger.warning(
+                                "Queue full for slot %s — preserving lifecycle-owned "
+                                "messages and using notification fallback",
+                                slot_key,
+                            )
                     else:
                         # circular import: chat_runner imports from
                         # kiro_crew.dashboard.handlers (for MAX_PROMPT_BYTES,
@@ -2510,7 +2529,7 @@ async def api_send_message(request: web.Request) -> web.Response:
                         )
                         slot.task = task
                         state.push_slots_update()
-                    sent_session = True
+                        sent_session = True
         # Fall back to normal delivery if no session target or session is gone
         if not sent_session:
             # Snapshot before the suffix below: that sentence describes the BELL's
@@ -2524,7 +2543,10 @@ async def api_send_message(request: web.Request) -> web.Response:
                 safe_name, _ = redact_exfiltration_urls(job_name)
                 safe_name, _ = redact_credentials(safe_name)
                 title = f"⏰ {safe_name}"
-                text += "\n\n_(session closed — delivered as notification)_"
+                if session_fallback_reason == _SESSION_FALLBACK_QUEUE_FULL:
+                    text += "\n\n_(session queue full — delivered as notification)_"
+                else:
+                    text += "\n\n_(session closed — delivered as notification)_"
             state.notify("agent", title, text)
             # No widget on either channel path, so a parsed [OPTIONS:] trailer is
             # re-attached as a numbered list rather than dropped: the user still
@@ -2767,6 +2789,8 @@ async def api_send_message(request: web.Request) -> web.Response:
         "session": sent_session,
         "delivered_to": delivered_to,
     }
+    if not sent_session and session_fallback_reason:
+        resp_body["fallback_reason"] = session_fallback_reason
     if slack_ts:
         resp_body["ts"] = slack_ts
     return web.json_response(resp_body)

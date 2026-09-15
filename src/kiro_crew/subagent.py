@@ -2239,7 +2239,7 @@ class SubagentManager:
 
     def notify_injection_failed(
         self, info: SubagentInfo, reason: str = "delivery timed out"
-    ) -> None:
+    ) -> "asyncio.Task | None":  # type: ignore[type-arg]
         return self._terminal.notify_injection_failed_impl(info, reason)
 
     @property
@@ -2289,6 +2289,9 @@ class SubagentManager:
 
     def running_agents_for(self, parent_key: str) -> list[dict]:
         return self._run_events.running_agents_for_impl(parent_key)
+
+    def terminal_delivery_inflight_for(self, parent_session_key: str) -> bool:
+        return self._terminal.terminal_delivery_inflight_for_impl(parent_session_key)
 
     def task_memory_rows(self) -> list[dict[str, object]]:
         return self._monitor.task_memory_rows_impl()
@@ -2349,6 +2352,9 @@ class SubagentManager:
 
     async def _safe_announce(self, info: SubagentInfo) -> None:
         return await self._admission._safe_announce_impl(info)
+
+    def _start_rejection_delivery(self, info: SubagentInfo) -> "asyncio.Task | None":  # type: ignore[type-arg]
+        return self._admission._start_rejection_delivery_impl(info)
 
     def _announce_rejection(self, info: SubagentInfo) -> SubagentInfo:
         return self._admission._announce_rejection_impl(info)

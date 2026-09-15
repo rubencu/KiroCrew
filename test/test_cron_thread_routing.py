@@ -422,7 +422,11 @@ class TestDashboardInjectionRoutesRunChat:
         ):
             await subagent_done(info)
 
-        slot.queue_append.assert_called_once()
+        slot.queue_insert.assert_called_once()
+        queued = slot.queue_insert.call_args
+        assert queued.args[0] == 0
+        assert callable(queued.kwargs["on_consumed"])
+        assert callable(queued.kwargs["on_discarded"])
 
     @pytest.mark.asyncio
     async def test_error_callback_notifies_with_redacted_reason(self) -> None:

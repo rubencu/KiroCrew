@@ -6313,6 +6313,7 @@ class GatewayOrchestrator:
                     directive_consumer=build_directive_consumer(
                         session_key=key,
                         sessions=self.sessions,
+                        subagents=self.subagent_mgr,
                     ),
                     monitor_completion=(
                         (
@@ -8684,6 +8685,61 @@ class GatewayOrchestrator:
                         )
                         return
 
+                    # The manager report owns the completion only until this
+                    # callback accepts it. Dashboard delivery can continue after
+                    # that return (queued or an asynchronous _run_chat turn), so
+                    # transfer the stop fence to the slot before the handoff.
+                    # Count by id rather than a bool: an erroneous duplicate
+                    # callback cannot release the first delivery early.
+                    _pending = getattr(_injection_slot, "_subagent_completion_pending", None)
+                    if not isinstance(_pending, dict):
+                        _pending = {}
+                        _injection_slot._subagent_completion_pending = _pending
+                    _pending[info.id] = _pending.get(info.id, 0) + 1
+
+                    def _note_completion_consumed(consumed: bool = True) -> None:
+                        count = _pending.get(info.id, 0)
+                        if consumed:
+                            if count <= 1:
+                                _pending.pop(info.id, None)
+                            else:
+                                _pending[info.id] = count - 1
+                        elif count <= 0:
+                            # The first empty response retracts consumption and
+                            # requeues the exact row with this callback attached.
+                            _pending[info.id] = 1
+
+                    def _note_completion_discarded() -> None:
+                        """Retire a completion row with no consumer or retry."""
+                        _note_completion_consumed()
+                        try:
+                            owed = _injection_slot.take_pending_subagent_deliveries([announce])
+                        except Exception:
+                            logger.debug(
+                                "Subagent %s: could not retire discarded delivery debt",
+                                info.id,
+                                exc_info=True,
+                            )
+                            return
+                        if not owed or self.subagent_mgr is None:
+                            return
+                        try:
+                            work = self.subagent_mgr.settle_queued_delivery(owed)
+                        except Exception:
+                            logger.debug(
+                                "Subagent %s: discarded delivery settlement refused",
+                                info.id,
+                                exc_info=True,
+                            )
+                            return
+                        if not asyncio.iscoroutine(work):
+                            return
+                        writer = asyncio.create_task(work)
+                        background_tasks = getattr(self.dashboard_state, "_background_tasks", None)
+                        if isinstance(background_tasks, set):
+                            background_tasks.add(writer)
+                            writer.add_done_callback(background_tasks.discard)
+
                     # Fix 2 (B1) race guard: count this completion as an
                     # in-flight delivery from entry until it is handed off (turn
                     # launched or queued). The synthesis fire-gate in chat_runner
@@ -8725,6 +8781,7 @@ class GatewayOrchestrator:
                                         "Subagent %s: skipping queue " "(already collected inline)",
                                         info.id,
                                     )
+                                    _note_completion_consumed()
                                     return
                                 logger.info(
                                     "Subagent %s: slot %s claimed by another injection, queuing",
@@ -8738,10 +8795,13 @@ class GatewayOrchestrator:
                                 # Carry the structured completion facts so the
                                 # drained row is a card without re-parsing the
                                 # prose; _start_next_queued_turn reads them.
-                                _injection_slot.queue_append(
+                                _injection_slot.queue_insert(
+                                    len(_injection_slot._queue),
                                     announce,
                                     kind=SUBAGENT_COMPLETION_KIND,
                                     meta={SUBAGENT_COMPLETION_META_KEY: sub_meta},
+                                    on_consumed=_note_completion_consumed,
+                                    on_discarded=_note_completion_discarded,
                                 )
                                 # Queuing is not delivery. The announce promises
                                 # result paths the parent can read on demand, but
@@ -8771,6 +8831,7 @@ class GatewayOrchestrator:
                                 "(already collected inline by spawn_sub_agents)",
                                 info.id,
                             )
+                            _note_completion_consumed()
                             return
 
                         # Slot is idle — start _run_chat.
@@ -8820,10 +8881,12 @@ class GatewayOrchestrator:
                             # re-queues this exact announce verbatim, so the
                             # delivery that counts has not happened yet.
                             _consumed[0] = consumed
+                            _note_completion_consumed(consumed)
 
-                        _run_kwargs: dict[str, Any] = {}
-                        if _owes_delivery:
-                            _run_kwargs["_on_consumed"] = _note_consumed
+                        _run_kwargs: dict[str, Any] = {
+                            "_on_consumed": _note_consumed,
+                            "_on_discarded": _note_completion_discarded,
+                        }
                         _task = asyncio.create_task(
                             bounded_chat_turn(
                                 _run_chat(
@@ -9394,6 +9457,18 @@ class GatewayOrchestrator:
                         failure_msg, _ = redact_exfiltration_urls(failure_msg)
                         failure_msg, _ = redact_credentials(failure_msg)
                         slot._pending_subagent_failures.append(failure_msg)
+                        # The original delivery may have failed before its
+                        # consumption callback fired. The failure copy is now
+                        # safely retained for the next turn, so transfer rather
+                        # than duplicate the fence; subagents_attached keeps
+                        # guarding on _pending_subagent_failures itself.
+                        pending = getattr(slot, "_subagent_completion_pending", None)
+                        if isinstance(pending, dict):
+                            count = pending.get(info.id, 0)
+                            if count <= 1:
+                                pending.pop(info.id, None)
+                            else:
+                                pending[info.id] = count - 1
                     self.dashboard_state.push_slots_update()
                     logger.warning(
                         "Injected timeout error for subagent %s into slot %s", info.id, slot_name

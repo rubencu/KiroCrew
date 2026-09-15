@@ -3415,7 +3415,13 @@ def _subagents_attached_response(
     """
     if subagents_attached(state, slot, session_key, operation):
         return web.json_response(
-            {"error": "sub-agents are running", "code": "slot_subagents_running"},
+            {
+                "error": (
+                    "sub-agent work is still attached; wait for it to finish or "
+                    "remove its queued completion before retrying"
+                ),
+                "code": "slot_subagents_running",
+            },
             status=409,
         )
     return None
@@ -4101,7 +4107,7 @@ async def stop_slot_turn(
         # this hard kill a clean stop. Scoped to this card so it cannot defer
         # a later card's ack.
         slot._stop_escalated_card_id = slot._stop_event_id
-        slot._queue.clear()
+        slot.queue_discard_all()
         # Hard kill = "discard everything": drop unconsumed steers too, so the
         # end-of-turn requeue (chat_runner finally) has nothing to resurrect.
         # Mirrors the queue clear above; a soft stop preserves both.
