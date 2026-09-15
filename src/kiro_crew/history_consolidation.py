@@ -28,7 +28,11 @@ from kiro_crew.llm_helpers import (
 )
 from kiro_crew.project_scope import scope_is_admissible
 from kiro_crew.security import redact_credentials, redact_exfiltration_urls
-from kiro_crew.skills import AUTO_SKILL_MAX_PROCEDURE_CHARS, AutoSkillProvenance
+from kiro_crew.skills import (
+    AUTO_SKILL_MAX_PROCEDURE_CHARS,
+    AutoSkillProvenance,
+    canonical_skill_text_hash,
+)
 from kiro_crew.skills_dedupe import (
     VERDICT_DUP,
     VERDICT_NEW,
@@ -1277,6 +1281,8 @@ class HistoryConsolidator:
                     )
                 except Exception:
                     self._logger.debug("Periodic skill lifecycle pass failed", exc_info=True)
+                else:
+                    self._last_lifecycle = _time.time()
 
             # Only advance the consolidated offset for history consolidation.
             # Prefs-only consolidation uses a separate in-memory offset.
@@ -1861,6 +1867,7 @@ class HistoryConsolidator:
         triggers: str,
         procedure_md: str,
         scripts: "list[dict] | None" = None,
+        scripts_supplied: bool = False,
     ) -> None:
         """Stage a pending UPDATE candidate for an existing auto-skill.
 
@@ -1973,6 +1980,13 @@ class HistoryConsolidator:
         _live_description = _frontmatter_value(live_body, "description")
         _staged_triggers = _merge_trigger_lists(_live_triggers, triggers)
         _staged_description = description or _live_description
+        auto_apply = (
+            not self._auto_refine_enabled
+            and not self._approval_required
+            and not scripts
+            and not scripts_supplied
+        )
+        unattended_binding: list[str] = []
         name = loader.stage_skill_candidate(
             _update_slug,
             description=_staged_description,
@@ -1983,6 +1997,9 @@ class HistoryConsolidator:
             kind="update",
             target=target_key,
             base_version=base_version,
+            notify=not auto_apply,
+            base_content_hash=canonical_skill_text_hash(live_body),
+            unattended_binding_out=unattended_binding if auto_apply else None,
         )
         if name:
             self._logger.info(
@@ -2003,6 +2020,13 @@ class HistoryConsolidator:
                     "merged": used_merge,
                 },
             )
+            if auto_apply and unattended_binding:
+                self._auto_apply_staged_update(
+                    key=key,
+                    staged_name=name,
+                    target_key=target_key,
+                    candidate_binding=unattended_binding[0],
+                )
         else:
             self._logger.info("Skill update staging rejected for target '%s'", target_key)
             _facade_sel().log_tool_invocation(
@@ -2012,6 +2036,73 @@ class HistoryConsolidator:
                 outcome="rejected",
                 metadata={"slug": _update_slug, "reason": "creation_failed"},
             )
+
+    def _auto_apply_staged_update(
+        self,
+        *,
+        key: str,
+        staged_name: str,
+        target_key: str,
+        candidate_binding: str,
+    ) -> None:
+        loader = self._skills_loader
+        if loader is None:
+            return
+        slug = staged_name.split("/", 1)[-1]
+        applied: tuple[str, int] | None = None
+        try:
+            applied = loader.auto_apply_pending_update(
+                slug,
+                expected_candidate_binding=candidate_binding,
+            )
+        except Exception:
+            self._logger.warning(
+                "Auto-apply failed for %s; leaving it pending review",
+                staged_name,
+                exc_info=True,
+            )
+        if applied:
+            applied_name, new_version = applied
+            _facade_sel().log_tool_invocation(
+                session_key=key,
+                tool_name="auto_skill_create",
+                tool_kind="skills",
+                outcome="auto_applied_update",
+                metadata={
+                    "name": applied_name,
+                    "target": target_key,
+                    "new_version": new_version,
+                },
+            )
+            # Mirror the dashboard approve path: bound the live set now, with
+            # the just-updated skill exempted. An update carries the ORIGINAL
+            # created_at forward, so an old zero-hit target would otherwise be
+            # archived by the next lifecycle pass. Best-effort; never fail the
+            # apply that already committed. A failed pass leaves the throttle
+            # stamp unchanged so the periodic path can retry promptly.
+            try:
+                loader.run_skill_lifecycle(
+                    max_auto_skills=self._max_auto_skills,
+                    stale_after_days=self._stale_after_days,
+                    archive_after_days=self._archive_after_days,
+                    exempt={applied_name},
+                )
+            except Exception:  # pragma: no cover - defensive
+                self._logger.debug("Skill lifecycle pass failed after auto-apply", exc_info=True)
+            else:
+                self._last_lifecycle = _time.time()
+            return
+        _facade_sel().log_tool_invocation(
+            session_key=key,
+            tool_name="auto_skill_create",
+            tool_kind="skills",
+            outcome="auto_apply_failed",
+            metadata={
+                "name": staged_name,
+                "target": target_key,
+                "reason": "left_pending_for_review",
+            },
+        )
 
     def _process_auto_skills(self, result: dict, key: str) -> None:
         """Extract + write auto-generated skills from the consolidation result.
@@ -2083,6 +2174,25 @@ class HistoryConsolidator:
                         "reason": "empty_after_redaction",
                     },
                 )
+            elif scripts_supplied and not valid_scripts:
+                # A candidate that SUPPLIED scripts but had EVERY script rejected
+                # by the static validator is dropped AS A WHOLE. Auto-applying it
+                # would ship a script-bearing proposal as a prose-only skill;
+                # staging it would queue a misleading pending item whose scripts
+                # are gone and that a human cannot meaningfully approve. Reject +
+                # audit so the drop is visible rather than silent.
+                self._logger.info(
+                    "Auto-skill candidate '%s' dropped: every supplied script "
+                    "failed static validation",
+                    slug,
+                )
+                _facade_sel().log_tool_invocation(
+                    session_key=key,
+                    tool_name="auto_skill_create",
+                    tool_kind="skills",
+                    outcome="rejected",
+                    metadata={"slug": slug, "reason": "all_scripts_invalid"},
+                )
             else:
                 verdict, target = self._dedupe_candidate(slug, description, triggers)
                 # ``_dedupe_candidate`` deliberately shows the judge already-PENDING
@@ -2135,6 +2245,7 @@ class HistoryConsolidator:
                         triggers=triggers,
                         procedure_md=procedure_md,
                         scripts=valid_scripts or None,
+                        scripts_supplied=scripts_supplied,
                     )
                 else:
                     provenance = AutoSkillProvenance(
