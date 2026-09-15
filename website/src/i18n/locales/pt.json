@@ -5906,6 +5906,9 @@
       "clear_stopped_goal": "Excluir objetivo parado",
       "loop_stopped": "Parado",
       "stopped_help": "Iniciar ciclo retoma este objetivo. Excluir objetivo parado o remove definitivamente.",
+      "stopped_help_cycle_cap": "Aumente Máximo de ciclos para retomar este objetivo. Excluir objetivo parado o remove definitivamente.",
+      "stopped_help_runtime_budget": "O orçamento de execução foi definido quando este objetivo foi criado. Exclua-o e inicie um novo objetivo.",
+      "stopped_reason_cycle_cap": "Máximo de ciclos atingido.",
       "clear_goal_for_good": "Excluir o objetivo definitivamente",
       "cancel": "Cancelar",
       "clear_goal_question": "Excluir este objetivo definitivamente?"

@@ -128,19 +128,25 @@ def test_read_text_or_missing_absorbs_bad_bytes_instead_of_raising(tmp_path: Pat
     assert out is not None and "ok" in out and "tail" in out
 
 
-def test_non_ascii_finding_is_not_read_as_absent(tmp_path: Path):
-    """The watchdog's false-stall bug: a valid UTF-8 finding read as ``{}``.
+def test_non_ascii_finding_is_not_read_as_absent(isolated: Path):
+    """Valid UTF-8 stays visible through the owned-path security gate.
 
-    ``_read_finding_file`` swallows UnicodeDecodeError by design, so under cp936
-    a healthy campaign's findings vanished silently and the stall verdict failed
-    it. Pinning UTF-8 is what makes the finding visible.
+    The reader now accepts only campaign-owned cycle files. Exercise that real
+    shape under a non-ASCII root as well as a non-ASCII JSON payload so Windows
+    path and locale behavior are both covered without weakening containment.
     """
-    p = tmp_path / "cycle_001.json"
-    p.write_text(
-        json.dumps({"cycle": 1, "summary": NON_ASCII, "new_findings_count": 3}),
-        encoding="utf-8",
-    )
-    data = mod._read_finding_file(p)
+    unicode_root = isolated / f"research-{NON_ASCII}"
+    with patch.object(mod, "RESEARCH_DIR", unicode_root):
+        cid = _new_campaign()
+        p = unicode_root / cid / "findings" / "cycle_001.json"
+        p.write_text(
+            json.dumps(
+                {"cycle": 1, "summary": NON_ASCII, "new_findings_count": 3},
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        data = mod._read_finding_file(p)
     assert data.get("cycle") == 1
 
 
@@ -238,10 +244,7 @@ def test_delete_campaign_keeps_the_row_when_a_path_cannot_be_removed(isolated: P
     """
     cid = _new_campaign()
 
-    def _failing_rmtree(path, onexc=None, **_kw):
-        onexc(None, str(path), OSError("in use"))
-
-    with patch.object(mod.shutil, "rmtree", _failing_rmtree):
+    with patch.object(mod, "_remove_campaign_tree", return_value=["in use"]):
         result = mod.delete_campaign(cid)
     assert result == {"error": "cleanup incomplete", "residual": True}
     assert mod.get_campaign(cid) is not None
@@ -261,10 +264,7 @@ def test_delete_campaign_retried_after_cleanup_succeeds(isolated: Path):
     """
     cid = _new_campaign()
 
-    def _failing_rmtree(path, onexc=None, **_kw):
-        onexc(None, str(path), OSError("in use"))
-
-    with patch.object(mod.shutil, "rmtree", _failing_rmtree):
+    with patch.object(mod, "_remove_campaign_tree", return_value=["in use"]):
         first = mod.delete_campaign(cid)
     assert first["error"] == "cleanup incomplete"
 

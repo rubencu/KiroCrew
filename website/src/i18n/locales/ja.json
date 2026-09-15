@@ -5718,6 +5718,9 @@
       "clear_stopped_goal": "停止した目標を削除",
       "loop_stopped": "停止中",
       "stopped_help": "ループを開始するとこの目標を再開します。停止した目標を削除すると完全に消えます。",
+      "stopped_help_cycle_cap": "この目標を再開するには最大サイクル数を増やしてください。停止した目標を削除すると完全に消えます。",
+      "stopped_help_runtime_budget": "実行時間の上限はこの目標の作成時に設定されました。削除してから、新しい目標を開始してください。",
+      "stopped_reason_cycle_cap": "最大サイクル数に達しました。",
       "clear_goal_for_good": "目標を完全に削除",
       "cancel": "キャンセル",
       "clear_goal_question": "この目標を完全に削除しますか？"

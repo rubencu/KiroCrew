@@ -5812,6 +5812,9 @@
       "clear_stopped_goal": "Gestopptes Ziel löschen",
       "loop_stopped": "Gestoppt",
       "stopped_help": "Schleife starten setzt dieses Ziel fort. Gestopptes Ziel löschen entfernt es endgültig.",
+      "stopped_help_cycle_cap": "Erhöhen Sie „Max. Zyklen“, um dieses Ziel fortzusetzen. Gestopptes Ziel löschen entfernt es endgültig.",
+      "stopped_help_runtime_budget": "Das Laufzeitbudget wurde beim Erstellen dieses Ziels festgelegt. Löschen Sie es und starten Sie dann ein neues Ziel.",
+      "stopped_reason_cycle_cap": "Maximale Zyklen erreicht.",
       "clear_goal_for_good": "Ziel endgültig löschen",
       "cancel": "Abbrechen",
       "clear_goal_question": "Dieses Ziel endgültig löschen?"

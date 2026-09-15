@@ -5718,6 +5718,9 @@
       "clear_stopped_goal": "중지된 목표 삭제",
       "loop_stopped": "중지됨",
       "stopped_help": "루프 시작으로 이 목표를 다시 실행합니다. 중지된 목표 삭제는 영구히 지웁니다.",
+      "stopped_help_cycle_cap": "이 목표를 다시 시작하려면 최대 사이클 수를 늘리세요. 중지된 목표 삭제는 영구히 지웁니다.",
+      "stopped_help_runtime_budget": "런타임 예산은 이 목표를 만들 때 설정되었습니다. 삭제한 다음 새 목표를 시작하세요.",
+      "stopped_reason_cycle_cap": "최대 사이클 수에 도달했습니다.",
       "clear_goal_for_good": "목표를 영구히 삭제",
       "cancel": "취소",
       "clear_goal_question": "이 목표를 영구히 삭제하시겠습니까?"

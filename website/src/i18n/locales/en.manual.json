@@ -1725,6 +1725,9 @@
       "clear_stopped_goal": "Clear stopped goal",
       "loop_stopped": "Stopped",
       "stopped_help": "Start loop resumes this goal. Clear stopped goal removes it for good.",
+      "stopped_help_cycle_cap": "Raise Max cycles to resume this goal. Clear stopped goal removes it for good.",
+      "stopped_help_runtime_budget": "The runtime budget was set when this goal was created. Clear it, then start a new goal.",
+      "stopped_reason_cycle_cap": "Reached Max cycles.",
       "clear_goal_for_good": "Clear goal for good",
       "cancel": "Cancel",
       "clear_goal_question": "Remove this goal for good?"

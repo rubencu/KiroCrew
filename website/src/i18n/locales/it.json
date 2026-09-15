@@ -5906,6 +5906,9 @@
       "clear_stopped_goal": "Elimina obiettivo interrotto",
       "loop_stopped": "Interrotto",
       "stopped_help": "Avvia ciclo riprende questo obiettivo. Elimina obiettivo interrotto lo rimuove definitivamente.",
+      "stopped_help_cycle_cap": "Aumenta Cicli massimi per riprendere questo obiettivo. Elimina obiettivo interrotto lo rimuove definitivamente.",
+      "stopped_help_runtime_budget": "Il budget di esecuzione è stato impostato quando è stato creato questo obiettivo. Eliminalo, poi avvia un nuovo obiettivo.",
+      "stopped_reason_cycle_cap": "Raggiunto il numero massimo di cicli.",
       "clear_goal_for_good": "Elimina definitivamente l’obiettivo",
       "cancel": "Annulla",
       "clear_goal_question": "Eliminare definitivamente questo obiettivo?"

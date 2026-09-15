@@ -5906,6 +5906,9 @@
       "clear_stopped_goal": "Supprimer l’objectif arrêté",
       "loop_stopped": "Arrêté",
       "stopped_help": "Démarrer la boucle reprend cet objectif. Supprimer l’objectif arrêté l’efface définitivement.",
+      "stopped_help_cycle_cap": "Augmentez Cycles max. pour reprendre cet objectif. Supprimer l’objectif arrêté l’efface définitivement.",
+      "stopped_help_runtime_budget": "Le budget d’exécution a été défini lors de la création de cet objectif. Supprimez-le, puis démarrez un nouvel objectif.",
+      "stopped_reason_cycle_cap": "Nombre maximal de cycles atteint.",
       "clear_goal_for_good": "Supprimer définitivement l’objectif",
       "cancel": "Annuler",
       "clear_goal_question": "Supprimer définitivement cet objectif ?"
