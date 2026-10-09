@@ -995,9 +995,12 @@ _SELF_CLOUD_DESTRUCTIVE_VERBS: frozenset[str] = frozenset(
 )
 
 
-def _self_cli_operands(tokens: "list[str]", i: int) -> "list[str]":
+def _self_cli_operands(
+    tokens: "list[str]", i: int, *, flags: "list[str] | None" = None
+) -> "list[str]":
     """Non-flag operand words the product CLI at program index *i* receives, in order.
 
+    *flags*, when given, collects the flag words the walk skips, normalized the same way.
     A token that stays a ``-``/``--`` word after quote/redirect normalization is a
     global flag and is skipped -- the self-protection top-level flags are all
     valueless (``-v``/``--verbose`` count, ``--no-jail`` bool), so a skipped flag
@@ -1033,6 +1036,8 @@ def _self_cli_operands(tokens: "list[str]", i: int) -> "list[str]":
             operand = _decode_printf_escapes(operand[1:])
         if operand and not operand.startswith("-"):
             operands.append(operand)
+        elif operand and flags is not None:
+            flags.append(operand)
         depth += _substitution_depth_delta(later)
         if depth <= 0 and _ends_argv(later):
             break
@@ -1143,13 +1148,17 @@ def _self_program_index(tokens: "list[str]", i: int, scan: "_SelfModuleScan") ->
     return None
 
 
-def _matches_self_subcommand(text_lower: str, spec: "tuple[object, ...]") -> bool:
+def _matches_self_subcommand(
+    text_lower: str, spec: "tuple[object, ...]", *, help_exempt: bool = False
+) -> bool:
     """True if the product CLI is invoked with leading operand words *spec*.
 
     Covers the direct form (``kirocrew`` as the argv program) and the module form
     (``python -m kiro_crew``), collecting operands after the CLI/module so the same
     shell de-escaping the regex tier cannot see is caught for both -- e.g.
     ``python -m kiro_crew -\\v restart``, which the interpreter-position regex misses.
+    With *help_exempt*, an argv that also carries ``-h`` or ``--help`` does not match:
+    the parser prints the usage and exits before the subcommand runs.
     """
     if not _self_floor_can_fire(text_lower):
         return False
@@ -1175,7 +1184,10 @@ def _matches_self_subcommand(text_lower: str, spec: "tuple[object, ...]") -> boo
                 command_disqualified=disqualified,
             ):
                 continue
-            if _operands_lead_with(_self_cli_operands(tokens, prog_idx), spec):
+            flags: "list[str]" = []
+            if _operands_lead_with(_self_cli_operands(tokens, prog_idx, flags=flags), spec):
+                if help_exempt and not {"-h", "--help"}.isdisjoint(flags):
+                    continue
                 return True
     return False
 
@@ -1203,6 +1215,11 @@ def _is_self_gateway_restart(text_lower: str) -> bool:
 def _is_self_cloud_destructive(text_lower: str) -> bool:
     """``kirocrew cloud <destructive>`` behind any shell dressing of interposed flags."""
     return _matches_self_subcommand(text_lower, ("cloud", _SELF_CLOUD_DESTRUCTIVE_VERBS))
+
+
+def _is_self_skills_authority_retire(text_lower: str) -> bool:
+    """``kirocrew skills authority-retire``; an argv with ``-h``/``--help`` only prints usage."""
+    return _matches_self_subcommand(text_lower, ("skills", "authority-retire"), help_exempt=True)
 
 
 _DEV_MODE_CONFIRM_FLAG = "--confirm-out-of-install-root"

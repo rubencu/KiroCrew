@@ -372,7 +372,17 @@ def _url_payload_command(n: int) -> str:
 #: stall still refuses everywhere it did; only the words a refused agent reads moved.
 #: The prefix is named only while its cooldown is open, since most stall raises never
 #: charge it.
-_PACKAGE_LINE_BUDGET = 29_607
+#:
+#: Raised again, from 29,607, for the ``self-protection-skills-authority-retire`` floor,
+#: which denies the operator-only ``kirocrew skills authority-retire`` recovery
+#: through an agent shell: one argv matcher, its rule row and reason in
+#: ``denied_rules``, its ``is_denied`` registration, its facade export, and its name
+#: in the ungated-floor comment. No pass widened and no threshold moved. 12 more
+#: lines let a help request through that floor alone: ``-h`` or ``--help`` in the same
+#: argv prints the usage and retires nothing, so ``_self_cli_operands`` can hand back
+#: the flag words it skips and ``_matches_self_subcommand`` takes a ``help_exempt``
+#: switch.
+_PACKAGE_LINE_BUDGET = 29_639
 
 #: Ceiling on any ONE file in the package. This is what the bound is really for --
 #: a package total says nothing about a single file growing back into a second
